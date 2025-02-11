@@ -14,12 +14,14 @@
 
 #define MPIDU_GENQ_SHMEM_QUEUE_TYPE__MPSC MPIDU_GENQ_SHMEM_QUEUE_TYPE__NEM_MPSC
 #define MPIDU_GENQ_SHMEM_QUEUE_TYPE__MPMC MPIDU_GENQ_SHMEM_QUEUE_TYPE__NEM_MPMC
+#define MPIDU_GENQ_SHMEM_QUEUE_TYPE__SPSC MPIDU_GENQ_SHMEM_QUEUE_TYPE__NEM_SPSC
 
 typedef enum {
     MPIDU_GENQ_SHMEM_QUEUE_TYPE__SERIAL,
     MPIDU_GENQ_SHMEM_QUEUE_TYPE__INV_MPSC,
     MPIDU_GENQ_SHMEM_QUEUE_TYPE__NEM_MPSC,
     MPIDU_GENQ_SHMEM_QUEUE_TYPE__NEM_MPMC,
+    MPIDU_GENQ_SHMEM_QUEUE_TYPE__NEM_SPSC,
 } MPIDU_genq_shmem_queue_type_e;
 
 /* SERIAL */
@@ -78,7 +80,12 @@ static inline int MPIDU_genqi_nem_mpsc_init(MPIDU_genq_shmem_queue_u * queue)
 static inline int MPIDU_genqi_nem_mpsc_dequeue(MPIDU_genqi_shmem_pool_s * pool_obj,
                                                MPIDU_genq_shmem_queue_u * queue, void **cell)
 {
-    void *handle = MPL_atomic_load_ptr(&queue->q.head.m);
+    // if (cxl_acquire_lock(&queue->q.lock, MPIR_Process.rank)) {
+    //    fprintf(stderr, "Rank %d MPIDU_genqi_nem_mpsc_enqueue failed to acquire the lock of queue\n", MPIR_Process.rank);
+    //    return -1;
+    // } 
+    clflush_region_with_mfence(queue, sizeof(MPIDU_genq_shmem_queue_u));
+    void *handle = cxl_nt_load_ptr(&queue->q.head.m.v);
     if (!handle) {
         /* queue is empty */
         *cell = NULL;
@@ -86,27 +93,54 @@ static inline int MPIDU_genqi_nem_mpsc_dequeue(MPIDU_genqi_shmem_pool_s * pool_o
         MPIDU_genqi_shmem_cell_header_s *cell_h = NULL;
         cell_h = HANDLE_TO_HEADER(pool_obj, handle);
         *cell = HEADER_TO_CELL(cell_h);
-
-        void *next_handle = MPL_atomic_load_ptr(&cell_h->u.nem_queue.next_m);
+        // if (cxl_acquire_lock(&cell_h->lock, MPIR_Process.rank)) {
+        //    fprintf(stderr, "Rank %d MPIDU_genqi_nem_mpsc_enqueue failed to acquire the lock of cell\n", MPIR_Process.rank);
+        //    return -1;
+        // }
+        clflush_region_with_mfence(cell_h, pool_obj->cell_alloc_size);
+        void *next_handle = cxl_nt_load_ptr(&cell_h->u.nem_queue.next_m.v);
         if (next_handle != NULL) {
             /* just dequeue the head */
-            MPL_atomic_store_ptr(&queue->q.head.m, next_handle);
+            cxl_nt_store_ptr(&queue->q.head.m.v, next_handle);
+           // printf("MPIDU_genqi_nem_mpsc_dequeue queue->q.head.m:  %#" PRIxPTR "\n", queue->q.head.m);
         } else {
             /* single element, tail == head,
              * have to make sure no enqueuing is in progress */
-            MPL_atomic_store_ptr(&queue->q.head.m, NULL);
-            if (MPL_atomic_cas_ptr(&queue->q.tail.m, handle, NULL) == handle) {
+            cxl_nt_store_ptr(&queue->q.head.m.v, NULL);
+            // printf("MPIDU_genqi_nem_mpsc_dequeue queue->q.head.m:  %#" PRIxPTR "\n", queue->q.head.m);
+            if (cxl_acquire_lock(&queue->q.lock, MPIR_Process.rank)) {
+                fprintf(stderr, "Rank %d MPIDU_genqi_nem_mpsc_enqueue failed to acquire the lock of queue\n", MPIR_Process.rank);
+                return -1;
+            }             
+            clflush_region_with_mfence(queue, sizeof(MPIDU_genq_shmem_queue_u));
+            // void* cas_ret = MPL_atomic_cas_ptr(&queue->q.tail.m, handle, NULL);
+            void* cas_ret = cxl_nt_cas_ptr(&queue->q.tail.m.v, handle, NULL);
+            clflush_region_with_mfence(queue, sizeof(MPIDU_genq_shmem_queue_u));
+            cxl_release_lock(&queue->q.lock, MPIR_Process.rank);
+            if (cas_ret == handle) {
                 /* no enqueuing in progress, we are done */
             } else {
                 /* busy wait for the enqueuing to finish */
                 do {
-                    next_handle = MPL_atomic_load_ptr(&cell_h->u.nem_queue.next_m);
+                    clflush_region_with_mfence(cell_h, pool_obj->cell_alloc_size);
+                    next_handle = cxl_nt_load_ptr(&cell_h->u.nem_queue.next_m.v);
                 } while (next_handle == NULL);
                 /* then set the header */
-                MPL_atomic_store_ptr(&queue->q.head.m, next_handle);
+                cxl_nt_store_ptr(&queue->q.head.m.v, next_handle);
+                // printf("MPIDU_genqi_nem_mpsc_dequeue queue->q.head.m:  %#" PRIxPTR "\n", queue->q.head.m);
             }
         }
+        clflush_region_with_mfence(cell_h, pool_obj->cell_alloc_size);
+        // if (cxl_release_lock(&cell_h->lock, MPIR_Process.rank)) {
+        //    fprintf(stderr, "Rank %d MPIDU_genqi_nem_mpsc_enqueue failed to release the lock of cell\n", MPIR_Process.rank);
+        //    return -1;
+        // }
     }
+    clflush_region_with_mfence(queue, sizeof(MPIDU_genq_shmem_queue_u));
+    // if (cxl_release_lock(&queue->q.lock, MPIR_Process.rank)) {
+    //    fprintf(stderr, "Rank %d MPIDU_genqi_nem_mpsc_enqueue failed to release the lock of queue\n", MPIR_Process.rank);
+    //    return -1;
+    // } 
     return 0;
 }
 
@@ -114,20 +148,62 @@ static inline int MPIDU_genqi_nem_mpsc_enqueue(MPIDU_genqi_shmem_pool_s * pool_o
                                                MPIDU_genq_shmem_queue_u * queue, void *cell)
 {
     MPIDU_genqi_shmem_cell_header_s *cell_h = CELL_TO_HEADER(cell);
-    MPL_atomic_store_ptr(&cell_h->u.nem_queue.next_m, NULL);
+    // if (cxl_acquire_lock(&queue->q.lock, MPIR_Process.rank)) {
+    //   fprintf(stderr, "Rank %d MPIDU_genqi_nem_mpsc_enqueue failed to acquire the lock of queue\n", MPIR_Process.rank);
+    //   return -1;
+    // }
+    // if (cxl_acquire_lock(&cell_h->lock, MPIR_Process.rank)) {
+    //    fprintf(stderr, "Rank %d MPIDU_genqi_nem_mpsc_enqueue failed to acquire the lock of cell\n", MPIR_Process.rank);
+    //    return -1;
+    // }
+    clflush_region_with_mfence(cell_h, pool_obj->cell_alloc_size);
+    clflush_region_with_mfence(queue, sizeof(MPIDU_genq_shmem_queue_u));
+
+    cxl_nt_store_ptr(&cell_h->u.nem_queue.next_m.v, NULL);
 
     void *handle = (void *) cell_h->handle;
 
     void *tail_handle = NULL;
-    tail_handle = MPL_atomic_swap_ptr(&queue->q.tail.m, handle);
+    if (cxl_acquire_lock(&queue->q.lock, MPIR_Process.rank)) {
+      fprintf(stderr, "Rank %d MPIDU_genqi_nem_mpsc_enqueue failed to acquire the lock of queue\n", MPIR_Process.rank);
+      return -1;
+    }
+    while (1) {
+        // we may not fetch the correct tail_handle because of the writing conflicts
+        // tail_handle = cxl_nt_swap_ptr(&queue->q.tail.m.v, handle);
+        clflush_region_with_mfence(queue, sizeof(MPIDU_genq_shmem_queue_u));
+        tail_handle = MPL_atomic_swap_ptr(&queue->q.tail.m, handle);
+        clflush_region_with_mfence(queue, sizeof(MPIDU_genq_shmem_queue_u));
+        if (cxl_nt_load_ptr(&queue->q.tail.m.v) == handle) {
+            break;
+        }
+    }
+    // tail_handle = MPL_atomic_swap_ptr(&queue->q.tail.m, handle);
+    // clflush_region_with_mfence(queue, sizeof(MPIDU_genq_shmem_queue_u));
+    cxl_release_lock(&queue->q.lock, MPIR_Process.rank);
+    if (tail_handle == handle) {
+        fprintf(stderr,  "tail_handle == handle err!!!!\n");
+        MPIR_Assert(tail_handle != handle);
+    }
     if (tail_handle == NULL) {
         /* queue was empty */
-        MPL_atomic_store_ptr(&queue->q.head.m, handle);
+        cxl_nt_store_ptr(&queue->q.head.m.v, handle);
     } else {
         MPIDU_genqi_shmem_cell_header_s *tail_cell_h = NULL;
         tail_cell_h = HANDLE_TO_HEADER(pool_obj, tail_handle);
-        MPL_atomic_store_ptr(&tail_cell_h->u.nem_queue.next_m, handle);
+        cxl_nt_store_ptr(&tail_cell_h->u.nem_queue.next_m.v, handle);
+        clflush_region_with_mfence(tail_cell_h, pool_obj->cell_alloc_size);
     }
+    clflush_region_with_mfence(cell_h, pool_obj->cell_alloc_size);
+    clflush_region_with_mfence(queue, sizeof(MPIDU_genq_shmem_queue_u));
+    // if (cxl_release_lock(&cell_h->lock, MPIR_Process.rank)) {
+    //   fprintf(stderr, "Rank %d MPIDU_genqi_nem_mpsc_enqueue failed to release the lock of cell\n", MPIR_Process.rank);
+    //   return -1;
+    // }
+    // if (cxl_release_lock(&queue->q.lock, MPIR_Process.rank)) {
+    //    fprintf(stderr, "Rank %d MPIDU_genqi_nem_mpsc_enqueue failed to release the lock of queue\n", MPIR_Process.rank);
+    //    return -1;
+    // } 
     return 0;
 }
 
@@ -190,7 +266,6 @@ static inline int MPIDU_genqi_nem_mpmc_dequeue(MPIDU_genqi_shmem_pool_s * pool_o
             }
         }
     }
-
     return 0;
 }
 
@@ -212,6 +287,91 @@ static inline int MPIDU_genqi_nem_mpmc_enqueue(MPIDU_genqi_shmem_pool_s * pool_o
         tail_cell_h = HANDLE_TO_HEADER(pool_obj, tail_handle);
         MPL_atomic_store_ptr(&tail_cell_h->u.nem_queue.next_m, handle);
     }
+    return 0;
+}
+
+/* NEMESIS SPSC QUEUE */
+static inline int MPIDU_genqi_nem_spsc_init(MPIDU_genq_shmem_queue_u * queue)
+{
+    cxl_nt_store_uint64(&queue->q.head.s, 0);
+    cxl_nt_store_uint64(&queue->q.tail.s, 0);
+    return 0;
+}
+
+static inline int MPIDU_genqi_nem_spsc_dequeue(MPIDU_genq_shmem_pool_t pool, MPIDU_genq_shmem_queue_t queue, int sender_id, int recv_id, void **cell)
+{
+    MPIDU_genqi_shmem_pool_s *pool_obj = (MPIDU_genqi_shmem_pool_s *) pool;
+    MPIDU_genq_shmem_queue_u *queue_obj = (MPIDU_genq_shmem_queue_u *) queue;
+
+    int cur_head = cxl_nt_load_uint64(&queue_obj->q.head.s);
+    int cur_tail = cxl_nt_load_uint64(&queue_obj->q.tail.s);
+    if (cur_head == cur_tail) {
+        // Ring queue is empty.
+        *cell = NULL;
+        return 0;
+    }
+    int cell_id = cur_tail;
+    MPIDU_genqi_shmem_cell_header_s *cell_h = NULL;
+    cell_h = SENDER_RECV_CELL_TO_HEADER(pool_obj, sender_id, recv_id, cell_id);
+    *cell = HEADER_TO_CELL(cell_h);
+    // fprintf(stderr, "MPIDU_genqi_nem_spsc_dequeue my_rank %d, peer_id %d, cell_id %d, cell pointer %p, pool_obj pointer %p, cell_idx %d, num_proc %d, num_cell_per_proc %d, &queue_obj->q.tail.s %p\n", recv_id, sender_id, cell_id, *cell, pool_obj, (recv_id * (pool_obj)->num_proc * (pool_obj)->cells_per_proc + sender_id * (pool_obj)->cells_per_proc + cell_id), (pool_obj)->num_proc , (pool_obj)->cells_per_proc, &queue_obj->q.tail.s);
+
+
+    // int next_tail = (cur_tail + 1) % (pool_obj->cells_per_proc);
+    // cxl_nt_store_uint64(&queue_obj->q.tail.s, next_tail);
+
+    return 0;
+}
+
+static inline int MPIDU_genqi_nem_spsc_dequeue_commit(MPIDU_genq_shmem_pool_t pool, MPIDU_genq_shmem_queue_t queue, int sender_id, int recv_id, void **cell)
+{
+    _mm_mfence(); 
+    MPIDU_genqi_shmem_pool_s *pool_obj = (MPIDU_genqi_shmem_pool_s *) pool;
+    MPIDU_genq_shmem_queue_u *queue_obj = (MPIDU_genq_shmem_queue_u *) queue;
+
+    int cur_tail = cxl_nt_load_uint64(&queue_obj->q.tail.s);
+    int next_tail = (cur_tail + 1) % (pool_obj->cells_per_proc);
+    cxl_nt_store_uint64(&queue_obj->q.tail.s, next_tail);
+
+    // fprintf(stderr, "MPIDU_genqi_nem_spsc_dequeue_commit my_rank %d, peer_id %d, cell_id %d\n", recv_id, sender_id, cur_tail);
+
+    return 0;
+}
+
+static inline int MPIDU_genqi_nem_spsc_enqueue(MPIDU_genq_shmem_pool_t pool, MPIDU_genq_shmem_queue_t queue, int sender_id, int recv_id, void **cell)
+{
+    MPIDU_genqi_shmem_pool_s *pool_obj = (MPIDU_genqi_shmem_pool_s *) pool;
+    MPIDU_genq_shmem_queue_u *queue_obj = (MPIDU_genq_shmem_queue_u *) queue;
+
+    int cur_head = cxl_nt_load_uint64(&queue_obj->q.head.s);
+    int cur_tail = cxl_nt_load_uint64(&queue_obj->q.tail.s);
+    int next_head = (cur_head + 1) % (pool_obj->cells_per_proc);
+    if (next_head == cur_tail) {
+        // Ring queue is full.
+        *cell = NULL;
+        return 0;
+    }
+    int cell_id = cur_head;
+    MPIDU_genqi_shmem_cell_header_s *cell_h = NULL;
+    cell_h = SENDER_RECV_CELL_TO_HEADER(pool_obj, sender_id, recv_id, cell_id);
+    *cell = HEADER_TO_CELL(cell_h);
+    // fprintf(stderr, "MPIDU_genqi_nem_spsc_enqueue my_rank %d, peer_id %d, cell_id %d, cell pointer %p, cell_idx %d\n", sender_id, recv_id, cell_id, *cell, (recv_id * (pool_obj)->num_proc * (pool_obj)->cells_per_proc + sender_id * (pool_obj)->cells_per_proc + cell_id));
+
+    // cxl_nt_store_uint64(&queue_obj->q.head.s, next_head);
+
+    return 0;
+}
+static inline int MPIDU_genqi_nem_spsc_enqueue_commit(MPIDU_genq_shmem_pool_t pool, MPIDU_genq_shmem_queue_t queue, int sender_id, int recv_id, void **cell)
+{
+    _mm_mfence(); 
+    MPIDU_genqi_shmem_pool_s *pool_obj = (MPIDU_genqi_shmem_pool_s *) pool;
+    MPIDU_genq_shmem_queue_u *queue_obj = (MPIDU_genq_shmem_queue_u *) queue;
+
+    int cur_head = cxl_nt_load_uint64(&queue_obj->q.head.s);
+    int next_head = (cur_head + 1) % (pool_obj->cells_per_proc);
+    cxl_nt_store_uint64(&queue_obj->q.head.s, next_head);
+
+    // fprintf(stderr, "MPIDU_genqi_nem_spsc_enqueue_commit my_rank %d, peer_id %d, cell_id %d\n", sender_id, recv_id, cur_head);
     return 0;
 }
 

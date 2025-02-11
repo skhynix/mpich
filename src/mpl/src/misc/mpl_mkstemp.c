@@ -14,15 +14,14 @@
 /* here to prevent "has no symbols" warnings from ranlib on OS X */
 static int dummy ATTRIBUTE((unused)) MPL_USED = 0;
 
-#ifndef MPL_HAVE_MKSTEMP
-
 #define MAX_TRIES 100   /* max number of filenames we try before giving up */
 #define NUM_XS 6        /* number of X's in the template */
 
 /* replaces NUM_XS characters in xs with random characters
    xs must be at least NUM_XS chars long */
-static void randchar(char xs[])
+void MPL_randchar(char xs[])
 {
+    
     char chararray[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz1234567890";
     int i;
 
@@ -30,7 +29,26 @@ static void randchar(char xs[])
         xs[i] = chararray[rand() % (sizeof(chararray) - 1)];
 }
 
+int MPL_tmpx(char *template, char **X) {
+    int i;
 
+    /* find the end of the template string */
+    *X = template;
+    while (**X)
+        ++(*X);
+
+    /* back up NUM_XS characters and check to make sure they're all 'X' */
+    for (i = 0; i < NUM_XS; ++i) {
+        --(*X);
+        if (*X < template || **X != 'X') {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+#ifndef MPL_HAVE_MKSTEMP
 int MPL_mkstemp(char *template)
 {
     int fd;
@@ -55,7 +73,7 @@ int MPL_mkstemp(char *template)
     }
 
     for (i = 0; i < MAX_TRIES; ++i) {
-        randchar(X);
+        MPL_randchar(X);
         fd = open(template, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
         if (fd != -1)
             return fd;

@@ -424,6 +424,7 @@ int MPID_Abort(struct MPIR_Comm *comm, int mpi_errno, int exit_code, const char 
  * netmod or MPIDIU locality functions. */
 MPL_STATIC_INLINE_PREFIX int MPIDI_rank_is_local(int rank, MPIR_Comm * comm);
 MPL_STATIC_INLINE_PREFIX int MPIDI_av_is_local(MPIDI_av_entry_t * av);
+MPL_STATIC_INLINE_PREFIX int MPIDI_av_is_local_cxl(MPIDI_av_entry_t * av);
 
 /* Include netmod prototypes */
 #include <netmod.h>

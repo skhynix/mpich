@@ -142,10 +142,37 @@ MPL_STATIC_INLINE_PREFIX int MPIDIG_mpi_win_start(MPIR_Group * group, int assert
     if (assert & MPI_MODE_NOCHECK) {
         goto no_check;
     }
+    int win_grp_idx, peer, local_target_rank;
+    int *ranks_in_win_grp = NULL;
+    uint64_t *target_win_sync = NULL;
+    ranks_in_win_grp = (int *) MPL_malloc(sizeof(int) * group->size, MPL_MEM_RMA);
+    MPIR_Assert(ranks_in_win_grp);
+    mpi_errno = MPIDIG_fill_ranks_in_win_grp(win, group, ranks_in_win_grp);
+    MPIR_ERR_CHECK(mpi_errno);
 
-    MPIDIU_PROGRESS_WHILE(group->size != (int) MPIDIG_WIN(win, sync).pw.count, vci);
+    if (MPIDIG_WIN(win, mmap_sync_addr_pw) == NULL) {
+      MPIDIU_PROGRESS_WHILE(group->size != (int) MPIDIG_WIN(win, sync).pw.count, vci);
+    } else {
+      target_win_sync = MPIDIG_WIN(win, sync_addr_pw);
+      for (win_grp_idx = 0; win_grp_idx < group->size; ++win_grp_idx) {
+        peer = ranks_in_win_grp[win_grp_idx];
+        local_target_rank = MPIDIU_rank_to_lpid(peer, win->comm_ptr);
+        MPIDIU_PROGRESS_WHILE(
+          (1 != (int) cxl_nt_load_uint64(&target_win_sync[local_target_rank])), vci);
+      }
+    }
+    
   no_check:
-    MPIDIG_WIN(win, sync).pw.count = 0;
+    if (MPIDIG_WIN(win, mmap_sync_addr_pw) == NULL) {
+      MPIDIG_WIN(win, sync).pw.count = 0;
+    } else {
+      target_win_sync = MPIDIG_WIN(win, sync_addr_pw);
+      for (win_grp_idx = 0; win_grp_idx < group->size; ++win_grp_idx) {
+        peer = ranks_in_win_grp[win_grp_idx];
+        local_target_rank = MPIDIU_rank_to_lpid(peer, win->comm_ptr);
+        cxl_nt_store_uint64(&target_win_sync[local_target_rank], 0);
+      }
+    }
 
     MPIR_ERR_CHKANDJUMP((MPIDIG_WIN(win, sync).sc.group != NULL),
                         mpi_errno, MPI_ERR_GROUP, "**group");
@@ -203,15 +230,28 @@ MPL_STATIC_INLINE_PREFIX int MPIDIG_mpi_win_complete(MPIR_Win * win)
     MPIDIU_PROGRESS_DO_WHILE(!MPIDIG_win_check_group_local_completed
                              (win, ranks_in_win_grp, group->size), vci);
 
-    for (win_grp_idx = 0; win_grp_idx < group->size; ++win_grp_idx) {
-        peer = ranks_in_win_grp[win_grp_idx];
+    if (MPIDIG_WIN(win, mmap_sync_addr_sc) == NULL) {
+      for (win_grp_idx = 0; win_grp_idx < group->size; ++win_grp_idx) {
+          peer = ranks_in_win_grp[win_grp_idx];
 
-        int vci_target = MPIDI_WIN_TARGET_VCI(win, peer);
-        CH4_CALL(am_send_hdr
-                 (peer, win->comm_ptr, MPIDIG_WIN_COMPLETE, &msg, sizeof(msg), vci, vci_target),
-                 MPIDI_rank_is_local(peer, win->comm_ptr), mpi_errno);
-        if (mpi_errno != MPI_SUCCESS)
-            MPIR_ERR_SETANDSTMT(mpi_errno, MPI_ERR_RMA_SYNC, goto fn_fail, "**rmasync");
+          int vci_target = MPIDI_WIN_TARGET_VCI(win, peer);
+          CH4_CALL(am_send_hdr
+                   (peer, win->comm_ptr, MPIDIG_WIN_COMPLETE, &msg, sizeof(msg), vci, vci_target),
+                   MPIDI_rank_is_local_cxl(peer, win->comm_ptr), mpi_errno);
+          if (mpi_errno != MPI_SUCCESS)
+              MPIR_ERR_SETANDSTMT(mpi_errno, MPI_ERR_RMA_SYNC, goto fn_fail, "**rmasync");
+      }
+    } else {
+      int local_target_rank;
+      MPIDIG_win_shared_sync_t *shared_sync_sc = MPIDIG_WIN(win, shared_sync_sc);
+      uint64_t *target_win_sync = NULL;
+      for (win_grp_idx = 0; win_grp_idx < group->size; ++win_grp_idx) {
+        peer = ranks_in_win_grp[win_grp_idx];
+        local_target_rank = MPIDIU_rank_to_lpid(peer, win->comm_ptr);
+        target_win_sync = shared_sync_sc[local_target_rank].shm_base_addr;
+        cxl_nt_store_uint64(&target_win_sync[win->comm_ptr->rank], 1);
+        // fprintf(stderr, "Rank %d target: %d, complete sc.count: %d\n", MPIR_Process.rank, local_target_rank, target_win_sync->sc.count);
+      }
     }
 
     /* In performance-efficient mode, all allocated targets are freed at win_finalize. */
@@ -265,14 +305,27 @@ MPL_STATIC_INLINE_PREFIX int MPIDIG_mpi_win_post(MPIR_Group * group, int assert,
     mpi_errno = MPIDIG_fill_ranks_in_win_grp(win, group, ranks_in_win_grp);
     MPIR_ERR_CHECK(mpi_errno);
 
-    for (win_grp_idx = 0; win_grp_idx < group->size; ++win_grp_idx) {
-        peer = ranks_in_win_grp[win_grp_idx];
-        int vci_target = MPIDI_WIN_TARGET_VCI(win, peer);
-        CH4_CALL(am_send_hdr
+    if (MPIDIG_WIN(win, mmap_sync_addr_pw) == NULL) {
+      for (win_grp_idx = 0; win_grp_idx < group->size; ++win_grp_idx) {
+          peer = ranks_in_win_grp[win_grp_idx];
+          int vci_target = MPIDI_WIN_TARGET_VCI(win, peer);
+          CH4_CALL(am_send_hdr
                  (peer, win->comm_ptr, MPIDIG_WIN_POST, &msg, sizeof(msg), vci, vci_target),
-                 MPIDI_rank_is_local(peer, win->comm_ptr), mpi_errno);
-        if (mpi_errno != MPI_SUCCESS)
+                 MPIDI_rank_is_local_cxl(peer, win->comm_ptr), mpi_errno);
+          if (mpi_errno != MPI_SUCCESS)
             MPIR_ERR_SETANDSTMT(mpi_errno, MPI_ERR_RMA_SYNC, goto fn_fail, "**rmasync");
+        }
+    } else {
+      int local_target_rank; 
+      uint64_t *target_win_sync = NULL;
+      MPIDIG_win_shared_sync_t *shared_sync_pw = MPIDIG_WIN(win, shared_sync_pw);
+      for (win_grp_idx = 0; win_grp_idx < group->size; ++win_grp_idx) {
+        peer = ranks_in_win_grp[win_grp_idx];
+        local_target_rank = MPIDIU_rank_to_lpid(peer, win->comm_ptr);
+        target_win_sync = shared_sync_pw[local_target_rank].shm_base_addr;
+        cxl_nt_store_uint64(&target_win_sync[win->comm_ptr->rank], 1);
+        // fprintf(stderr, "Rank %d target: %d, post pw.count: %d\n", MPIR_Process.rank, local_target_rank, target_win_sync->pw.count);
+      }
     }
 
   no_check:
@@ -298,9 +351,30 @@ MPL_STATIC_INLINE_PREFIX int MPIDIG_mpi_win_wait(MPIR_Win * win)
 
     MPIDIG_EXPOSURE_EPOCH_CHECK(win, MPIDIG_EPOTYPE_POST, mpi_errno, goto fn_fail);
     group = MPIDIG_WIN(win, sync).pw.group;
-    MPIDIU_PROGRESS_WHILE(group->size != (int) MPIDIG_WIN(win, sync).sc.count, vci);
 
-    MPIDIG_WIN(win, sync).sc.count = 0;
+    int win_grp_idx, peer, local_target_rank;
+    int *ranks_in_win_grp = (int *) MPL_malloc(sizeof(int) * group->size, MPL_MEM_RMA);
+    MPIR_Assert(ranks_in_win_grp);
+    mpi_errno = MPIDIG_fill_ranks_in_win_grp(win, group, ranks_in_win_grp);
+    MPIR_ERR_CHECK(mpi_errno);
+
+    if (MPIDIG_WIN(win, mmap_sync_addr_sc) == NULL) {
+      MPIDIU_PROGRESS_WHILE(group->size != (int) MPIDIG_WIN(win, sync).sc.count, vci);
+      MPIDIG_WIN(win, sync).sc.count = 0;
+    } else {
+      uint64_t *target_win_sync = MPIDIG_WIN(win, sync_addr_sc);
+      for (win_grp_idx = 0; win_grp_idx < group->size; ++win_grp_idx) {
+        peer = ranks_in_win_grp[win_grp_idx];
+        local_target_rank = MPIDIU_rank_to_lpid(peer, win->comm_ptr);
+        MPIDIU_PROGRESS_WHILE(
+          (1 != (int) cxl_nt_load_uint64(&target_win_sync[local_target_rank])), vci);
+      }
+      for (win_grp_idx = 0; win_grp_idx < group->size; ++win_grp_idx) {
+        peer = ranks_in_win_grp[win_grp_idx];
+        local_target_rank = MPIDIU_rank_to_lpid(peer, win->comm_ptr);
+        cxl_nt_store_uint64(&target_win_sync[local_target_rank], 0);
+      }
+    }
     MPIDIG_WIN(win, sync).pw.group = NULL;
     MPIR_Group_release(group);
     MPIDIG_WIN(win, sync).exposure_epoch_type = MPIDIG_EPOTYPE_NONE;
@@ -328,17 +402,66 @@ MPL_STATIC_INLINE_PREFIX int MPIDIG_mpi_win_test(MPIR_Win * win, int *flag)
     MPIR_Group *group;
     group = MPIDIG_WIN(win, sync).pw.group;
 
-    if (group->size == (int) MPIDIG_WIN(win, sync).sc.count) {
+    int win_grp_idx, peer;
+    int *ranks_in_win_grp = NULL;
+
+    ranks_in_win_grp = (int *) MPL_malloc(sizeof(int) * group->size, MPL_MEM_RMA);
+    MPIR_Assert(ranks_in_win_grp);
+    mpi_errno = MPIDIG_fill_ranks_in_win_grp(win, group, ranks_in_win_grp);
+    MPIR_ERR_CHECK(mpi_errno);
+    uint64_t *target_win_sync = MPIDIG_WIN(win, sync_addr_sc);
+    int local_target_rank;
+
+    bool completed = false;
+    if (MPIDIG_WIN(win, mmap_sync_addr_sc) == NULL) {
+      completed = (group->size == (int) MPIDIG_WIN(win, sync).sc.count);
+      if (completed) {
         MPIDIG_WIN(win, sync).sc.count = 0;
         MPIDIG_WIN(win, sync).pw.group = NULL;
         *flag = 1;
         MPIR_Group_release(group);
         MPIDIG_WIN(win, sync).exposure_epoch_type = MPIDIG_EPOTYPE_NONE;
+      }
     } else {
-        MPID_THREAD_CS_EXIT(VCI, MPIDI_VCI(vci).lock);
-        mpi_errno = MPID_Progress_test(NULL);
-        MPID_THREAD_CS_ENTER(VCI, MPIDI_VCI(vci).lock);
-        *flag = 0;
+      completed = true;
+      for (win_grp_idx = 0; win_grp_idx < group->size; ++win_grp_idx) {
+        peer = ranks_in_win_grp[win_grp_idx];
+        local_target_rank = MPIDIU_rank_to_lpid(peer, win->comm_ptr);
+        if (1 != (int) cxl_nt_load_uint64(&target_win_sync[local_target_rank])) {
+          completed = false;
+          break;
+        }
+      }
+      if (completed) {
+        cxl_nt_store_uint64(&target_win_sync[local_target_rank], 0);
+        for (win_grp_idx = 0; win_grp_idx < group->size; ++win_grp_idx) {
+          peer = ranks_in_win_grp[win_grp_idx];
+          local_target_rank = MPIDIU_rank_to_lpid(peer, win->comm_ptr);
+          cxl_nt_store_uint64(&target_win_sync[local_target_rank], 0);
+        }
+        MPIDIG_WIN(win, sync).pw.group = NULL;
+        *flag = 1;
+        MPIR_Group_release(group);
+        MPIDIG_WIN(win, sync).exposure_epoch_type = MPIDIG_EPOTYPE_NONE;
+      }
+    }
+    // if (group->size == (int) MPIDIG_WIN(win, sync).sc.count) {
+    //     MPIDIG_WIN(win, sync).sc.count = 0;
+    //     MPIDIG_WIN(win, sync).pw.group = NULL;
+    //     *flag = 1;
+    //     MPIR_Group_release(group);
+    //     MPIDIG_WIN(win, sync).exposure_epoch_type = MPIDIG_EPOTYPE_NONE;
+    // } else {
+    //     MPID_THREAD_CS_EXIT(VCI, MPIDI_VCI(vci).lock);
+    //     mpi_errno = MPID_Progress_test(NULL);
+    //     MPID_THREAD_CS_ENTER(VCI, MPIDI_VCI(vci).lock);
+    //     *flag = 0;
+    // }
+    if (!completed) {
+      MPID_THREAD_CS_EXIT(VCI, MPIDI_VCI(vci).lock);
+      mpi_errno = MPID_Progress_test(NULL);
+      MPID_THREAD_CS_ENTER(VCI, MPIDI_VCI(vci).lock);
+      *flag = 0;      
     }
 
   fn_exit:
@@ -379,7 +502,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDIG_mpi_win_lock(int lock_type, int rank, int as
 
     locked = slock->locked + 1;
     CH4_CALL(am_send_hdr(rank, win->comm_ptr, MPIDIG_WIN_LOCK, &msg, sizeof(msg), vci, vci_target),
-             MPIDI_rank_is_local(rank, win->comm_ptr), mpi_errno);
+             MPIDI_rank_is_local_cxl(rank, win->comm_ptr), mpi_errno);
 
     if (mpi_errno != MPI_SUCCESS)
         MPIR_ERR_SETANDSTMT(mpi_errno, MPI_ERR_RMA_SYNC, goto fn_fail, "**rmasync");
@@ -450,7 +573,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDIG_mpi_win_unlock(int rank, MPIR_Win * win)
 
     CH4_CALL(am_send_hdr
              (rank, win->comm_ptr, MPIDIG_WIN_UNLOCK, &msg, sizeof(msg), vci, vci_target),
-             MPIDI_rank_is_local(rank, win->comm_ptr), mpi_errno);
+             MPIDI_rank_is_local_cxl(rank, win->comm_ptr), mpi_errno);
     if (mpi_errno != MPI_SUCCESS)
         MPIR_ERR_SETANDSTMT(mpi_errno, MPI_ERR_RMA_SYNC, goto fn_fail, "**rmasync");
 
@@ -556,7 +679,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDIG_win_shared_query_part(MPIR_Win * win, int ra
         *size = win->size;
         *disp_unit = win->disp_unit;
         *((void **) baseptr) = win->base;
-    } else if (rank == MPI_PROC_NULL || !MPIDI_rank_is_local(rank, win->comm_ptr) ||
+    } else if (rank == MPI_PROC_NULL || !MPIDI_rank_is_local_cxl(rank, win->comm_ptr) ||
                MPIDIG_WIN(win, shared_table) == NULL) {
         *size = 0;
         *disp_unit = 0;
@@ -760,7 +883,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDIG_mpi_win_unlock_all(MPIR_Win * win)
         int vci_target = MPIDI_WIN_TARGET_VCI(win, i);
         CH4_CALL(am_send_hdr
                  (i, win->comm_ptr, MPIDIG_WIN_UNLOCKALL, &msg, sizeof(msg), vci, vci_target),
-                 MPIDI_rank_is_local(i, win->comm_ptr), mpi_errno);
+                 MPIDI_rank_is_local_cxl(i, win->comm_ptr), mpi_errno);
         if (mpi_errno != MPI_SUCCESS)
             MPIR_ERR_SETANDSTMT(mpi_errno, MPI_ERR_RMA_SYNC, goto fn_fail, "**rmasync");
     }
@@ -914,7 +1037,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDIG_mpi_win_lock_all(int assert, MPIR_Win * win)
         int vci_target = MPIDI_WIN_TARGET_VCI(win, i);
         CH4_CALL(am_send_hdr
                  (i, win->comm_ptr, MPIDIG_WIN_LOCKALL, &msg, sizeof(msg), vci, vci_target),
-                 MPIDI_rank_is_local(i, win->comm_ptr), mpi_errno);
+                 MPIDI_rank_is_local_cxl(i, win->comm_ptr), mpi_errno);
         if (mpi_errno != MPI_SUCCESS)
             MPIR_ERR_SETANDSTMT(mpi_errno, MPI_ERR_RMA_SYNC, goto fn_fail, "**rmasync");
     }

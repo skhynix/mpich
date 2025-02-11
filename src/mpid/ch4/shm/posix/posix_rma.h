@@ -108,7 +108,12 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_do_put(const void *origin_addr,
         disp_unit = win->disp_unit;
     } else {
         MPIDIG_win_shared_info_t *shared_table = MPIDIG_WIN(win, shared_table);
+        #ifdef MPL_USE_CXL_SHM
+        // int local_target_rank =  target_rank;
+        int local_target_rank = MPIDIU_rank_to_lpid(target_rank, win->comm_ptr);
+        #else
         int local_target_rank = MPIDIU_win_rank_to_intra_rank(win, target_rank, winattr);
+        #endif
         disp_unit = shared_table[local_target_rank].disp_unit;
         base = shared_table[local_target_rank].shm_base_addr;
     }
@@ -127,6 +132,11 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_do_put(const void *origin_addr,
                                    (char *) base + disp_unit * target_disp, target_count,
                                    target_datatype);
     }
+    MPI_Aint sendsize, sdata_sz;
+    MPIR_Datatype_get_size_macro(target_datatype, sendsize);
+    sdata_sz = sendsize * target_count;
+    clflush_region_with_mfence((char *) base + disp_unit * target_disp, sdata_sz);
+
 
   fn_exit:
     MPIR_FUNC_EXIT;
@@ -162,11 +172,20 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_do_get(void *origin_addr,
         disp_unit = win->disp_unit;
     } else {
         MPIDIG_win_shared_info_t *shared_table = MPIDIG_WIN(win, shared_table);
+        #ifdef MPL_USE_CXL_SHM
+        // int local_target_rank =  target_rank;
+        int local_target_rank = MPIDIU_rank_to_lpid(target_rank, win->comm_ptr);
+        #else
         int local_target_rank = MPIDIU_win_rank_to_intra_rank(win, target_rank, winattr);
+        #endif
         disp_unit = shared_table[local_target_rank].disp_unit;
         base = shared_table[local_target_rank].shm_base_addr;
     }
 
+   MPI_Aint sendsize, sdata_sz;
+   MPIR_Datatype_get_size_macro(target_datatype, sendsize);
+   sdata_sz = sendsize * target_count;
+   clflush_region_with_mfence((char *) base + disp_unit * target_disp, sdata_sz);
     if (winattr & MPIDI_WINATTR_MR_PREFERRED) {
         /* If MR-preferred is set, switch to nonblocking version which may slightly
          * increase per-op+flush overhead. */
@@ -221,7 +240,12 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_do_get_accumulate(const void *origin_ad
         disp_unit = win->disp_unit;
     } else {
         MPIDIG_win_shared_info_t *shared_table = MPIDIG_WIN(win, shared_table);
+        #ifdef MPL_USE_CXL_SHM
+        // int local_target_rank =  target_rank;
+        int local_target_rank = MPIDIU_rank_to_lpid(target_rank, win->comm_ptr);
+        #else
         int local_target_rank = MPIDIU_win_rank_to_intra_rank(win, target_rank, winattr);
+        #endif
         disp_unit = shared_table[local_target_rank].disp_unit;
         base = shared_table[local_target_rank].shm_base_addr;
         mapped_device = shared_table[local_target_rank].ipc_mapped_device;
@@ -236,6 +260,10 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_do_get_accumulate(const void *origin_ad
         MPID_THREAD_CS_ENTER(VCI, MPIDI_VCI(vci).lock);
     }
 
+    MPI_Aint sendsize, sdata_sz;
+    MPIR_Datatype_get_size_macro(target_datatype, sendsize);
+    sdata_sz = sendsize * target_count;
+    clflush_region_with_mfence((char *) base + disp_unit * target_disp, sdata_sz);
     mpi_errno = MPIR_Localcopy((char *) base + disp_unit * target_disp, target_count,
                                target_datatype, result_addr, result_count, result_datatype);
 
@@ -246,6 +274,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_do_get_accumulate(const void *origin_ad
                                                    target_count, target_datatype, op,
                                                    mapped_device);
     }
+    clflush_region_with_mfence((char *) base + disp_unit * target_disp, sdata_sz);
 
     if (winattr & MPIDI_WINATTR_SHM_ALLOCATED) {
         MPIDI_POSIX_RMA_MUTEX_UNLOCK(posix_win->shm_mutex_ptr);
@@ -289,7 +318,12 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_do_accumulate(const void *origin_addr,
         disp_unit = win->disp_unit;
     } else {
         MPIDIG_win_shared_info_t *shared_table = MPIDIG_WIN(win, shared_table);
+        #ifdef MPL_USE_CXL_SHM
+        // int local_target_rank =  target_rank;
+        int local_target_rank = MPIDIU_rank_to_lpid(target_rank, win->comm_ptr);
+        #else
         int local_target_rank = MPIDIU_win_rank_to_intra_rank(win, target_rank, winattr);
+        #endif
         disp_unit = shared_table[local_target_rank].disp_unit;
         base = shared_table[local_target_rank].shm_base_addr;
         mapped_device = shared_table[local_target_rank].ipc_mapped_device;
@@ -304,9 +338,14 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_do_accumulate(const void *origin_addr,
         MPID_THREAD_CS_ENTER(VCI, MPIDI_VCI(vci).lock);
     }
 
+    MPI_Aint sendsize, sdata_sz;
+    MPIR_Datatype_get_size_macro(target_datatype, sendsize);
+    sdata_sz = sendsize * target_count;
+    clflush_region_with_mfence((char *) base + disp_unit * target_disp, sdata_sz);
     mpi_errno = MPIDI_POSIX_compute_accumulate((void *) origin_addr, origin_count, origin_datatype,
                                                MPIR_get_contig_ptr(base, disp_unit * target_disp),
                                                target_count, target_datatype, op, mapped_device);
+    clflush_region_with_mfence((char *) base + disp_unit * target_disp, sdata_sz);
     if (winattr & MPIDI_WINATTR_SHM_ALLOCATED) {
         MPIDI_POSIX_RMA_MUTEX_UNLOCK(posix_win->shm_mutex_ptr);
     } else {
@@ -458,7 +497,12 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_mpi_compare_and_swap(const void *origin
         disp_unit = win->disp_unit;
     } else {
         MPIDIG_win_shared_info_t *shared_table = MPIDIG_WIN(win, shared_table);
+        #ifdef MPL_USE_CXL_SHM
+        // int local_target_rank =  target_rank;
+        int local_target_rank = MPIDIU_rank_to_lpid(target_rank, win->comm_ptr);
+        #else
         int local_target_rank = MPIDIU_win_rank_to_intra_rank(win, target_rank, winattr);
+        #endif
         disp_unit = shared_table[local_target_rank].disp_unit;
         base = shared_table[local_target_rank].shm_base_addr;
     }
@@ -475,10 +519,12 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_mpi_compare_and_swap(const void *origin
         MPID_THREAD_CS_ENTER(VCI, MPIDI_VCI(vci).lock);
     }
 
+    clflush_region_with_mfence(target_addr, dtype_sz);
     MPIR_Typerep_copy(result_addr, target_addr, dtype_sz, MPIR_TYPEREP_FLAG_NONE);
     if (MPIR_Compare_equal(compare_addr, target_addr, datatype)) {
         MPIR_Typerep_copy(target_addr, origin_addr, dtype_sz, MPIR_TYPEREP_FLAG_NONE);
     }
+    clflush_region_with_mfence(target_addr, dtype_sz);
 
     if (winattr & MPIDI_WINATTR_SHM_ALLOCATED) {
         MPIDI_POSIX_RMA_MUTEX_UNLOCK(posix_win->shm_mutex_ptr);
@@ -609,7 +655,12 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_mpi_fetch_and_op(const void *origin_add
         disp_unit = win->disp_unit;
     } else {
         MPIDIG_win_shared_info_t *shared_table = MPIDIG_WIN(win, shared_table);
+        #ifdef MPL_USE_CXL_SHM
+        // int local_target_rank =  target_rank;
+        int local_target_rank = MPIDIU_rank_to_lpid(target_rank, win->comm_ptr);
+        #else
         int local_target_rank = MPIDIU_win_rank_to_intra_rank(win, target_rank, winattr);
+        #endif
         disp_unit = shared_table[local_target_rank].disp_unit;
         base = shared_table[local_target_rank].shm_base_addr;
     }
@@ -627,6 +678,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_mpi_fetch_and_op(const void *origin_add
     }
 
     MPIR_Typerep_copy(result_addr, target_addr, dtype_sz, MPIR_TYPEREP_FLAG_NONE);
+    clflush_region_with_mfence(target_addr, dtype_sz);
 
     if (op != MPI_NO_OP) {
         /* We need to make sure op is valid here.

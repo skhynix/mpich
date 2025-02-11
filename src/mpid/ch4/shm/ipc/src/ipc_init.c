@@ -42,6 +42,7 @@ int MPIDI_IPC_init_world(void)
     MPIR_ERR_CHECK(mpi_errno);
 
     if (MPIR_CVAR_ENABLE_GPU) {
+        printf("MPIR_CVAR_ENABLE_GPU true\n");
         mpi_errno = MPIDI_GPU_init_world();
         MPIR_ERR_CHECK(mpi_errno);
     }

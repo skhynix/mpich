@@ -303,6 +303,8 @@ static int win_init(MPI_Aint length, int disp_unit, MPIR_Win ** win_ptr, MPIR_In
     win->copyDispUnit = 0;
     win->copySize = 0;
     MPIDIG_WIN(win, shared_table) = NULL;
+    MPIDIG_WIN(win, shared_sync_pw) = NULL;
+    MPIDIG_WIN(win, shared_sync_sc) = NULL;
     MPIDIG_WIN(win, sync).assert_mode = 0;
 
     /* Initialize the info (hint) flags per window */
@@ -342,6 +344,12 @@ static int win_init(MPI_Aint length, int disp_unit, MPIR_Win ** win_ptr, MPIR_In
 
     MPIDIG_WIN(win, mmap_sz) = 0;
     MPIDIG_WIN(win, mmap_addr) = NULL;
+    MPIDIG_WIN(win, mmap_sync_addr_pw) = NULL;
+    MPIDIG_WIN(win, mmap_sync_addr_sc) = NULL;
+    MPIDIG_WIN(win, sync_addr_pw) = NULL;
+    MPIDIG_WIN(win, sync_addr_sc) = NULL;
+    MPIDIG_WIN(win, mmap_sync_sz) = 0;
+
 
     MPIR_cc_set(&MPIDIG_WIN(win, local_cmpl_cnts), 0);
     MPIR_cc_set(&MPIDIG_WIN(win, remote_cmpl_cnts), 0);
@@ -459,6 +467,8 @@ static int win_finalize(MPIR_Win ** win_ptr)
 
             /* if shared memory allocation fails or zero size window, free the table at allocation. */
             MPL_free(MPIDIG_WIN(win, shared_table));
+            MPL_free(MPIDIG_WIN(win, shared_sync_pw));
+            MPL_free(MPIDIG_WIN(win, shared_sync_sc));
         } else
             MPL_free(win->base);
     }
@@ -493,10 +503,17 @@ static int win_shm_alloc_impl(MPI_Aint size, int disp_unit, MPIR_Comm * comm_ptr
     int i, mpi_errno = MPI_SUCCESS;
     MPIR_Win *win = NULL;
     size_t total_shm_size = 0LL;
+    size_t total_shm_sync_size = 0LL;
     MPIDIG_win_shared_info_t *shared_table = NULL;
+    MPIDIG_win_shared_sync_t *shared_sync_pw = NULL;
+    MPIDIG_win_shared_sync_t *shared_sync_sc = NULL;
     MPI_Aint *shm_offsets = NULL;
+    #ifdef MPL_USE_CXL_SHM
+    MPIR_Comm *shm_comm_ptr = comm_ptr;
+    #else
     MPIR_Comm *shm_comm_ptr = comm_ptr->node_comm;
-    size_t page_sz = 0, mapsize;
+    #endif
+    size_t page_sz = 0, mapsize, sync_mapsize;
     bool symheap_mapfail_flag = false, shm_mapfail_flag = false;
     bool symheap_flag = true, global_symheap_flag = false;
 
@@ -509,7 +526,11 @@ static int win_shm_alloc_impl(MPI_Aint size, int disp_unit, MPIR_Comm * comm_ptr
 
     /* Check whether multiple processes exist on the local node. If so,
      * we need to count the total size on a node for shared memory allocation. */
+    #ifdef MPL_USE_CXL_SHM
+    if (shm_comm_ptr->local_size > 1) {
+    #else
     if (shm_comm_ptr != NULL) {
+    #endif
         MPIR_T_PVAR_TIMER_START(RMA, rma_wincreate_allgather);
         MPIR_CHKPMEM_MALLOC(MPIDIG_WIN(win, shared_table), MPIDIG_win_shared_info_t *,
                             sizeof(MPIDIG_win_shared_info_t) * shm_comm_ptr->local_size,
@@ -525,6 +546,45 @@ static int win_shm_alloc_impl(MPI_Aint size, int disp_unit, MPIR_Comm * comm_ptr
                                    shared_table,
                                    sizeof(MPIDIG_win_shared_info_t), MPI_BYTE, shm_comm_ptr,
                                    MPIR_ERR_NONE);
+
+        MPIR_T_PVAR_TIMER_END(RMA, rma_wincreate_allgather);
+        if (mpi_errno != MPI_SUCCESS)
+            goto fn_fail;
+
+        // allocate private shared_sync_pw
+        MPIR_T_PVAR_TIMER_START(RMA, rma_wincreate_allgather);
+        MPIR_CHKPMEM_MALLOC(MPIDIG_WIN(win, shared_sync_pw), MPIDIG_win_shared_sync_t *,
+                                sizeof(MPIDIG_win_shared_sync_t) * shm_comm_ptr->local_size,
+                                mpi_errno, "shared sync", MPL_MEM_RMA);
+        shared_sync_pw = MPIDIG_WIN(win, shared_sync_pw);
+        shared_sync_pw[shm_comm_ptr->rank].size = sizeof(uint64_t) * shm_comm_ptr->local_size;
+        shared_sync_pw[shm_comm_ptr->rank].shm_base_addr = NULL;
+
+        mpi_errno = MPIR_Allgather(MPI_IN_PLACE,
+                                       0,
+                                       MPI_DATATYPE_NULL,
+                                       shared_sync_pw,
+                                       sizeof(MPIDIG_win_shared_sync_t), MPI_BYTE, shm_comm_ptr,
+                                       MPIR_ERR_NONE);
+        MPIR_T_PVAR_TIMER_END(RMA, rma_wincreate_allgather);
+        if (mpi_errno != MPI_SUCCESS)
+            goto fn_fail;
+
+        // allocate private shared_sync_sc
+        MPIR_T_PVAR_TIMER_START(RMA, rma_wincreate_allgather);
+        MPIR_CHKPMEM_MALLOC(MPIDIG_WIN(win, shared_sync_sc), MPIDIG_win_shared_sync_t *,
+                                sizeof(MPIDIG_win_shared_sync_t) * shm_comm_ptr->local_size,
+                                mpi_errno, "shared sync", MPL_MEM_RMA);
+        shared_sync_sc = MPIDIG_WIN(win, shared_sync_sc);
+        shared_sync_sc[shm_comm_ptr->rank].size = sizeof(uint64_t) * shm_comm_ptr->local_size;
+        shared_sync_sc[shm_comm_ptr->rank].shm_base_addr = NULL;
+
+        mpi_errno = MPIR_Allgather(MPI_IN_PLACE,
+                                       0,
+                                       MPI_DATATYPE_NULL,
+                                       shared_sync_sc,
+                                       sizeof(MPIDIG_win_shared_sync_t), MPI_BYTE, shm_comm_ptr,
+                                       MPIR_ERR_NONE);
         MPIR_T_PVAR_TIMER_END(RMA, rma_wincreate_allgather);
         if (mpi_errno != MPI_SUCCESS)
             goto fn_fail;
@@ -551,6 +611,7 @@ static int win_shm_alloc_impl(MPI_Aint size, int disp_unit, MPIR_Comm * comm_ptr
     } else
         total_shm_size = size;
 
+    #ifndef MPL_USE_CXL_SHM
     /* try global symm heap only when multiple processes exist */
     if (comm_ptr->local_size > 1) {
         /* global symm heap can be successful only when any of the following conditions meet.
@@ -565,11 +626,28 @@ static int win_shm_alloc_impl(MPI_Aint size, int disp_unit, MPIR_Comm * comm_ptr
         MPIR_ERR_CHECK(mpi_errno);
     } else
         global_symheap_flag = false;
+    #else
+        global_symheap_flag = false;
+    #endif /* MPL_USE_CXL_SHM */
 
+
+    // if (MPIDIG_WIN(win, info_args).alloc_shared_noncontig) {
+    //     printf("[win_shm_alloc_impl] alloc_shared_noncontig is true\n");
+    // } else {
+    //     printf("[win_shm_alloc_impl] alloc_shared_noncontig is false\n");
+    // }
+    // if (global_symheap_flag) {
+    //     printf("[win_shm_alloc_impl] global_symheap_flag is true\n");
+    // } else {
+    //     printf("[win_shm_alloc_impl] global_symheap_flag is false\n");
+    // }
     /* because MPI_shm follows a create & attach mode, we need to set the
      * size of entire shared memory segment on each node as the size of
      * each process. */
     mapsize = MPIDU_shm_get_mapsize(total_shm_size, &page_sz);
+    total_shm_sync_size = sizeof(uint64_t) * shm_comm_ptr->local_size * shm_comm_ptr->local_size;
+    sync_mapsize = MPIDU_shm_get_mapsize(total_shm_sync_size, &page_sz);
+
 
     /* first try global symmetric heap segment allocation */
     if (global_symheap_flag) {
@@ -583,6 +661,12 @@ static int win_shm_alloc_impl(MPI_Aint size, int disp_unit, MPIR_Comm * comm_ptr
             MPIDIG_WIN(win, mmap_addr) = NULL;
         }
     }
+    // if (symheap_mapfail_flag) {
+    //     printf("[win_shm_alloc_impl] symheap_mapfail_flag is true\n");
+    // } else {
+    //     printf("[win_shm_alloc_impl] symheap_mapfail_flag is false\n");
+    // }
+
 
     /* if symmetric heap is disabled or fails, try normal shm segment allocation */
     if (!global_symheap_flag || symheap_mapfail_flag) {
@@ -608,6 +692,16 @@ static int win_shm_alloc_impl(MPI_Aint size, int disp_unit, MPIR_Comm * comm_ptr
                                 MPL_MEM_RMA);
             MPL_VG_MEM_INIT(*base_ptr, size);
         }
+
+        MPIDIG_WIN(win, mmap_sync_sz) = sync_mapsize;
+        int rc = MPIDU_shm_alloc(shm_comm_ptr, sync_mapsize, &MPIDIG_WIN(win, mmap_sync_addr_pw));
+        if (rc != MPI_SUCCESS) {
+            goto fn_fail;
+        }
+        rc = MPIDU_shm_alloc(shm_comm_ptr, sync_mapsize, &MPIDIG_WIN(win, mmap_sync_addr_sc));
+        if (rc != MPI_SUCCESS) {
+            goto fn_fail;
+        }
     }
 
     /* compute the base addresses of each process within the shared memory segment */
@@ -630,6 +724,38 @@ static int win_shm_alloc_impl(MPI_Aint size, int disp_unit, MPIR_Comm * comm_ptr
         /* if symm heap is allocated without shared memory, use the mapping address */
         *base_ptr = MPIDIG_WIN(win, mmap_addr);
     }
+
+    if (shm_comm_ptr != NULL && MPIDIG_WIN(win, mmap_sync_addr_pw)) {
+        char *cur_base = (char *) MPIDIG_WIN(win, mmap_sync_addr_pw);
+        for (i = 0; i < shm_comm_ptr->local_size; i++) {
+            if (shared_sync_pw[i].size)
+                shared_sync_pw[i].shm_base_addr = cur_base;
+            else
+                shared_sync_pw[i].shm_base_addr = NULL;
+
+            if (MPIDIG_WIN(win, info_args).alloc_shared_noncontig)
+                cur_base += MPIDU_shm_get_mapsize(shared_sync_pw[i].size, &page_sz);
+            else
+                cur_base += shared_sync_pw[i].size;
+        }
+        MPIDIG_WIN(win, sync_addr_pw) = shared_sync_pw[shm_comm_ptr->rank].shm_base_addr;
+    }
+    if (shm_comm_ptr != NULL && MPIDIG_WIN(win, mmap_sync_addr_sc)) {
+        char *cur_base = (char *) MPIDIG_WIN(win, mmap_sync_addr_sc);
+        for (i = 0; i < shm_comm_ptr->local_size; i++) {
+            if (shared_sync_sc[i].size)
+                shared_sync_sc[i].shm_base_addr = cur_base;
+            else
+                shared_sync_sc[i].shm_base_addr = NULL;
+
+            if (MPIDIG_WIN(win, info_args).alloc_shared_noncontig)
+                cur_base += MPIDU_shm_get_mapsize(shared_sync_sc[i].size, &page_sz);
+            else
+                cur_base += shared_sync_sc[i].size;
+        }
+        MPIDIG_WIN(win, sync_addr_sc) = shared_sync_sc[shm_comm_ptr->rank].shm_base_addr;
+    }
+
     /* otherwise, it has already be assigned with a local memory region or NULL (zero size). */
 
   fn_no_shm:
@@ -936,12 +1062,14 @@ int MPIDIG_mpi_win_allocate_shared(MPI_Aint size, int disp_unit, MPIR_Info * inf
     MPIR_Win *win = NULL;
     MPIR_FUNC_ENTER;
 
+    #ifndef MPL_USE_CXL_SHM
     /* return error if not all processes are on the same shared memory domain */
     if (comm_ptr->local_size > 1 &&
         (comm_ptr->node_comm == NULL || comm_ptr->node_comm->local_size < comm_ptr->local_size)) {
         *win_ptr = NULL;
         MPIR_ERR_SETANDJUMP(mpi_errno, MPI_ERR_OTHER, "**winallocnotshared");
     }
+    #endif
 
     mpi_errno = win_init(size, disp_unit, win_ptr, info_ptr, comm_ptr, MPI_WIN_FLAVOR_SHARED,
                          MPI_WIN_UNIFIED);
@@ -998,6 +1126,10 @@ int MPIDIG_mpi_win_detach(MPIR_Win * win, const void *base)
 int MPIDIG_mpi_win_allocate(MPI_Aint size, int disp_unit, MPIR_Info * info, MPIR_Comm * comm,
                             void *baseptr, MPIR_Win ** win_ptr)
 {
+    #ifdef MPL_USE_CXL_SHM
+    return MPIDIG_mpi_win_allocate_shared(size, disp_unit, info, comm, baseptr, win_ptr);
+    #endif
+
     int mpi_errno = MPI_SUCCESS;
     MPIR_Win *win;
     void **base_ptr = (void **) baseptr;

@@ -353,6 +353,11 @@ typedef struct MPIDIG_win_shared_info {
     int mapped_type;            /* 0: gpu ipc mapped 1: gpu host mmapped 2: xpmem */
 } MPIDIG_win_shared_info_t;
 
+typedef struct MPIDIG_win_shared_sync {
+    size_t size;
+    void *shm_base_addr;
+} MPIDIG_win_shared_sync_t;
+
 #define MPIDIG_ACCU_ORDER_RAR (1)
 #define MPIDIG_ACCU_ORDER_RAW (1 << 1)
 #define MPIDIG_ACCU_ORDER_WAR (1 << 2)
@@ -482,6 +487,11 @@ typedef struct MPIDIG_win_t {
     uint64_t win_id;
     void *mmap_addr;
     int64_t mmap_sz;
+    void *mmap_sync_addr_pw;
+    void *mmap_sync_addr_sc;
+    int64_t mmap_sync_sz;
+    void *sync_addr_pw;
+    void *sync_addr_sc;
 
     /* per-window OP completion for fence */
     MPIR_cc_t local_cmpl_cnts;  /* increase at OP issuing, decrease at local completion */
@@ -491,6 +501,8 @@ typedef struct MPIDIG_win_t {
     MPIDIG_win_sync_t sync;
     MPIDIG_win_info_args_t info_args;
     MPIDIG_win_shared_info_t *shared_table;
+    MPIDIG_win_shared_sync_t *shared_sync_pw;
+    MPIDIG_win_shared_sync_t *shared_sync_sc;
 
     /* per-target structure for sync and OP completion. */
     MPIDIG_win_target_t *targets;

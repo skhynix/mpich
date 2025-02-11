@@ -35,7 +35,9 @@ mpl_headers =               \
     include/mpl_iov.h       \
     include/mpl_bt.h        \
     include/mpl_shm.h       \
-    include/mpl_misc.h
+    include/mpl_misc.h      \
+    include/cxl_shm.h       \
+    include/mem_hash.h
 
 if MPL_EMBEDDED_MODE
 noinst_HEADERS += $(mpl_headers)

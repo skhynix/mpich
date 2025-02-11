@@ -39,8 +39,15 @@ int MPIDU_Init_shm_alloc(size_t len, void **ptr)
     int mpi_errno = MPI_SUCCESS, mpl_err = 0;
     void *current_addr;
     size_t segment_len = len;
-    int local_rank = MPIR_Process.local_rank;
-    int num_local = MPIR_Process.local_size;
+
+    #ifdef MPL_USE_CXL_SHM
+    int my_rank = MPIR_Process.rank;
+    int num_ranks = MPIR_Process.size;
+    #else
+    int my_rank = MPIR_Process.local_rank;
+    int num_ranks = MPIR_Process.local_size;
+    #endif
+
     MPIDU_shm_seg_t *memory = NULL;
     memory_list_t *memory_node = NULL;
     MPIR_CHKPMEM_DECL(3);
@@ -53,6 +60,7 @@ int MPIDU_Init_shm_alloc(size_t len, void **ptr)
                         MPL_MEM_OTHER);
 
     mpl_err = MPL_shm_hnd_init(&(memory->hnd));
+    if (mpl_err) fprintf(stderr, "MPL_shm_hnd_init failed mpl_err: %d\n", mpl_err); 
     MPIR_ERR_CHKANDJUMP(mpl_err, mpi_errno, MPI_ERR_OTHER, "**alloc_shar_mem");
 
     memory->segment_len = segment_len;
@@ -60,7 +68,7 @@ int MPIDU_Init_shm_alloc(size_t len, void **ptr)
     char *serialized_hnd = NULL;
     int serialized_hnd_size = 0;
     /* if there is only one process on this processor, don't use shared memory */
-    if (num_local == 1) {
+    if (num_ranks == 1) {
         char *addr;
 
         MPIR_CHKPMEM_MALLOC(addr, char *, segment_len + MPIDU_SHM_CACHE_LINE_LEN, mpi_errno,
@@ -72,15 +80,17 @@ int MPIDU_Init_shm_alloc(size_t len, void **ptr)
                       (~((uintptr_t) MPIDU_SHM_CACHE_LINE_LEN - 1)));
         memory->symmetrical = 1;
     } else {
-        if (local_rank == 0) {
+        if (my_rank == 0) {
             /* root prepare shm segment */
             mpl_err = MPL_shm_seg_create_and_attach(memory->hnd, memory->segment_len,
                                                     (void **) &(memory->base_addr), 0);
+            if (mpl_err) fprintf(stderr, "MPL_shm_seg_create_and_attach failed\n");
             MPIR_ERR_CHKANDJUMP(mpl_err, mpi_errno, MPI_ERR_OTHER, "**alloc_shar_mem");
 
             MPIR_Assert(MPIR_Process.node_local_map[0] == MPIR_Process.rank);
 
             mpl_err = MPL_shm_hnd_get_serialized_by_ref(memory->hnd, &serialized_hnd);
+            if (mpl_err) fprintf(stderr, "MPL_shm_hnd_get_serialized_by_ref failed\n");
             MPIR_ERR_CHKANDJUMP(mpl_err, mpi_errno, MPI_ERR_OTHER, "**alloc_shar_mem");
             serialized_hnd_size = strlen(serialized_hnd) + 1;   /* add 1 for null char */
 
@@ -91,16 +101,18 @@ int MPIDU_Init_shm_alloc(size_t len, void **ptr)
             MPIDU_Init_shm_query(0, (void **) &serialized_hnd);
 
             mpl_err = MPL_shm_hnd_deserialize(memory->hnd, serialized_hnd, strlen(serialized_hnd));
+            if (mpl_err) fprintf(stderr, "MPL_shm_hnd_deserialize failed hnd %s, size %d\n", serialized_hnd,  strlen(serialized_hnd));
             MPIR_ERR_CHKANDJUMP(mpl_err, mpi_errno, MPI_ERR_OTHER, "**alloc_shar_mem");
 
             mpl_err = MPL_shm_seg_attach(memory->hnd, memory->segment_len,
                                          (void **) &memory->base_addr, 0);
+            if (mpl_err) fprintf(stderr, "MPL_shm_seg_attach failed\n");
             MPIR_ERR_CHKANDJUMP(mpl_err, mpi_errno, MPI_ERR_OTHER, "**attach_shar_mem");
         }
 
         MPIDU_Init_shm_barrier();
 
-        if (local_rank == 0) {
+        if (my_rank == 0) {
             /* memory->hnd no longer needed */
             mpl_err = MPL_shm_seg_remove(memory->hnd);
             MPIR_ERR_CHKANDJUMP(mpl_err, mpi_errno, MPI_ERR_OTHER, "**remove_shar_mem");
@@ -156,7 +168,11 @@ int MPIDU_Init_shm_free(void *ptr)
 
     MPIR_Assert(memory != NULL);
 
+    #ifdef MPL_USE_CXL_SHM
+    if (MPIR_Process.size == 1)
+    #else
     if (MPIR_Process.local_size == 1)
+    #endif
         MPL_free(memory->base_addr);
     else {
         mpl_err = MPL_shm_seg_detach(memory->hnd, (void **) &(memory->base_addr),
@@ -200,9 +216,15 @@ static int check_alloc(MPIDU_shm_seg_t * memory)
 
     MPIR_FUNC_ENTER;
 
+    #ifdef MPL_USE_CXL_SHM
+    if (MPIR_Process.rank == 0) {
+        MPIDU_Init_shm_put(memory->base_addr, sizeof(void *));
+    }
+    #else    
     if (MPIR_Process.local_rank == 0) {
         MPIDU_Init_shm_put(memory->base_addr, sizeof(void *));
     }
+    #endif
 
     MPIDU_Init_shm_barrier();
 
@@ -218,7 +240,11 @@ static int check_alloc(MPIDU_shm_seg_t * memory)
 
     MPIDU_Init_shm_barrier();
 
+    #ifdef MPL_USE_CXL_SHM
+    for (int i = 0; i < MPIR_Process.size; i++) { 
+    #else
     for (int i = 0; i < MPIR_Process.local_size; i++) {
+    #endif
         MPIDU_Init_shm_get(i, sizeof(int), &is_sym);
         if (is_sym == 0)
             break;

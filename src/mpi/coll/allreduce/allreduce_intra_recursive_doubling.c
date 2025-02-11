@@ -56,6 +56,7 @@ int MPIR_Allreduce_intra_recursive_doubling(const void *sendbuf,
     pof2 = MPL_pof2(comm_size);
 
     rem = comm_size - pof2;
+    // fprintf(stderr, "comm_size %d pof2 %d nem %d my_rank %d\n", comm_size, pof2, rem, rank);
 
     /* In the non-power-of-two case, all even-numbered
      * processes of rank < 2*rem send their data to
@@ -64,6 +65,7 @@ int MPIR_Allreduce_intra_recursive_doubling(const void *sendbuf,
      * remaining processes form a nice power-of-two. */
 
     if (rank < 2 * rem) {
+        // fprintf(stderr, "(rank < 2 * rem)  my_rank %d\n", rank);
         if (rank % 2 == 0) {    /* even */
             mpi_errno = MPIC_Send(recvbuf, count,
                                   datatype, rank + 1, MPIR_ALLREDUCE_TAG, comm_ptr, errflag);
@@ -101,6 +103,8 @@ int MPIR_Allreduce_intra_recursive_doubling(const void *sendbuf,
      * using recursive doubling in that case.) */
 
     if (newrank != -1) {
+        // fprintf(stderr, "newrank != -1 new_rank %d  my_rank %d\n", newrank, rank);
+
         mask = 0x1;
         while (mask < pof2) {
             newdst = newrank ^ mask;
@@ -109,6 +113,7 @@ int MPIR_Allreduce_intra_recursive_doubling(const void *sendbuf,
 
             /* Send the most current data, which is in recvbuf. Recv
              * into tmp_buf */
+            // fprintf(stderr, "newrank != -1 dst %d  my_rank %d\n", dst, rank);
             mpi_errno = MPIC_Sendrecv(recvbuf, count, datatype,
                                       dst, MPIR_ALLREDUCE_TAG, tmp_buf,
                                       count, datatype, dst,
@@ -138,6 +143,7 @@ int MPIR_Allreduce_intra_recursive_doubling(const void *sendbuf,
      * processes of rank < 2*rem send the result to
      * (rank-1), the ranks who didn't participate above. */
     if (rank < 2 * rem) {
+        // fprintf(stderr, "(rank < 2 * rem)  my_rank %d\n", rank);
         if (rank % 2)   /* odd */
             mpi_errno = MPIC_Send(recvbuf, count,
                                   datatype, rank - 1, MPIR_ALLREDUCE_TAG, comm_ptr, errflag);

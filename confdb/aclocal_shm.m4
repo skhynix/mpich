@@ -21,7 +21,7 @@ AC_DEFUN([PAC_ARG_SHARED_MEMORY],[
 
 # check how to allocate shared memory
 AC_ARG_WITH(shared-memory,
-    AS_HELP_STRING([--with-shared-memory[=auto|sysv|mmap]],[create shared memory using sysv or mmap (default is auto)]),,
+    AS_HELP_STRING([--with-shared-memory[=auto|sysv|mmap|cxl]],[create shared memory using sysv or mmap (default is auto)]),,
     with_shared_memory=auto)
 
 if test "$with_shared_memory" = auto -o "$with_shared_memory" = mmap; then
@@ -45,6 +45,11 @@ if test "$with_shared_memory" = auto -o "$with_shared_memory" = sysv; then
     elif test "$with_shared_memory" = sysv ; then
         AC_MSG_ERROR([cannot support shared memory:  sysv shared memory functions functions not found])
     fi
+fi
+if test "$with_shared_memory" = cxl ; then
+    with_shared_memory=cxl
+    AC_DEFINE(USE_CXL_SHM,1,[Define if use CXL shared memory])
+    AC_MSG_NOTICE([Using CXL shared memory])
 fi
 if test "$with_shared_memory" = nt ; then
     AC_DEFINE(USE_NT_SHM,1,[Define if use Windows shared memory])

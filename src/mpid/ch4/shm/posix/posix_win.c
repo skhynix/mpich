@@ -154,7 +154,11 @@ int MPIDI_POSIX_mpi_win_allocate_hook(MPIR_Win * win)
 {
     int mpi_errno = MPI_SUCCESS;
     MPIDI_POSIX_win_t *posix_win ATTRIBUTE((unused)) = NULL;
+    #ifdef MPL_USE_CXL_SHM
+    MPIR_Comm *shm_comm_ptr = win->comm_ptr;
+    #else
     MPIR_Comm *shm_comm_ptr = win->comm_ptr->node_comm;
+    #endif
     MPIR_FUNC_ENTER;
 
     posix_win_init_common(win);
@@ -191,7 +195,11 @@ int MPIDI_POSIX_mpi_win_allocate_shared_hook(MPIR_Win * win)
 {
     int mpi_errno = MPI_SUCCESS;
     MPIDI_POSIX_win_t *posix_win = NULL;
+    #ifdef MPL_USE_CXL_SHM
+    MPIR_Comm *shm_comm_ptr = win->comm_ptr;
+    #else
     MPIR_Comm *shm_comm_ptr = win->comm_ptr->node_comm;
+    #endif
     MPIR_FUNC_ENTER;
 
     posix_win_init_common(win);
@@ -259,7 +267,11 @@ int MPIDI_POSIX_shm_win_init_hook(MPIR_Win * win)
 {
     int mpi_errno = MPI_SUCCESS;
     MPIDI_POSIX_win_t *posix_win ATTRIBUTE((unused)) = NULL;
+    // #ifdef MPL_USE_CXL_SHM
+    // MPIR_Comm *shm_comm_ptr = win->comm_ptr;
+    // #else
     MPIR_Comm *shm_comm_ptr = win->comm_ptr->node_comm;
+    // #endif
     MPIR_FUNC_ENTER;
 
     posix_win = &win->dev.shm.posix;

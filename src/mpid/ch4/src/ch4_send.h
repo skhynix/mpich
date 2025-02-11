@@ -25,7 +25,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_isend(const void *buf,
     mpi_errno = MPIDI_NM_mpi_isend(buf, count, datatype, rank, tag, comm, attr, av, req);
 #else
     int r;
-    if ((r = MPIDI_av_is_local(av)))
+    if ((r = MPIDI_av_is_local_cxl(av)))
         mpi_errno = MPIDI_SHM_mpi_isend(buf, count, datatype, rank, tag, comm, attr, av, req);
     else
         mpi_errno = MPIDI_NM_mpi_isend(buf, count, datatype, rank, tag, comm, attr, av, req);

@@ -137,8 +137,13 @@ static int init_vci(int vci)
 
     MPIDI_POSIX_global.per_vci[vci].postponed_queue = NULL;
 
+    #ifdef MPL_USE_CXL_SHM
+    int active_rreq_size = MPIR_Process.size;
+    #else
+    int active_rreq_size = MPIR_Process.local_size;
+    #endif
     MPIDI_POSIX_global.per_vci[vci].active_rreq =
-        MPL_calloc(MPIR_Process.local_size, sizeof(MPIR_Request *), MPL_MEM_SHM);
+        MPL_calloc(active_rreq_size, sizeof(MPIR_Request *), MPL_MEM_SHM);
     MPIR_ERR_CHKANDJUMP(!MPIDI_POSIX_global.per_vci[vci].active_rreq,
                         mpi_errno, MPI_ERR_OTHER, "**nomem");
 

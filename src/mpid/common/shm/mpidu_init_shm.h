@@ -25,8 +25,8 @@ int MPIDU_Init_shm_init(void);
 int MPIDU_Init_shm_finalize(void);
 int MPIDU_Init_shm_barrier(void);
 int MPIDU_Init_shm_put(void *orig, size_t len);
-int MPIDU_Init_shm_get(int local_rank, size_t len, void *target);
-int MPIDU_Init_shm_query(int local_rank, void **target_addr);
+int MPIDU_Init_shm_get(int rank, size_t len, void *target);
+int MPIDU_Init_shm_query(int rank, void **target_addr);
 
 int MPIDU_Init_shm_alloc(size_t len, void **ptr);
 int MPIDU_Init_shm_free(void *ptr);

@@ -65,7 +65,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_improbe(int source,
                 MPIDI_REQUEST(*message, is_local) = 0;
             }
         }
-    } else if (MPIDI_av_is_local(av)) {
+    } else if (MPIDI_av_is_local_cxl(av)) {
         mpi_errno = MPIDI_SHM_mpi_improbe(source, tag, comm, attr, flag, message, status);
         MPIR_ERR_CHECK(mpi_errno);
         if (*flag)

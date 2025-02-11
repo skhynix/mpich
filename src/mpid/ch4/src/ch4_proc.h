@@ -250,6 +250,16 @@ MPL_STATIC_INLINE_PREFIX int MPIDIU_rank_to_lpid(int rank, MPIR_Comm * comm)
     return ret;
 }
 
+MPL_STATIC_INLINE_PREFIX int MPIDI_av_is_local_cxl(MPIDI_av_entry_t * av)
+{
+    return 1;
+}
+
+MPL_STATIC_INLINE_PREFIX int MPIDI_rank_is_local_cxl(int rank, MPIR_Comm * comm)
+{
+    return 1;
+}
+
 MPL_STATIC_INLINE_PREFIX int MPIDI_rank_is_local(int rank, MPIR_Comm * comm)
 {
     int ret;

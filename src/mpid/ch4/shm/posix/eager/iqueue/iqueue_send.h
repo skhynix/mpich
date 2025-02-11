@@ -55,19 +55,34 @@ MPIDI_POSIX_eager_send(int grank, MPIDI_POSIX_am_header_t * msg_hdr, const void 
     /* Try to get a new cell to hold the message */
     /* Select the appropriate pool depending on whether we are using sender-side or receiver-side
      * queuing. */
-    MPIDU_genq_shmem_pool_cell_alloc(transport->cell_pool, (void **) &cell,
-                                     MPIR_CVAR_GENQ_SHMEM_POOL_FREE_QUEUE_SENDER_SIDE ?
-                                     MPIR_Process.local_rank : grank, buf);
+    
+    #ifdef MPL_USE_CXL_SHM
+    int my_rank = MPIR_Process.rank;
+    #else
+    int my_rank = MPIR_Process.local_rank; 
+    #endif
+    // MPIDU_genq_shmem_pool_cell_alloc(transport->cell_pool, (void **) &cell,
+    //                                  MPIR_CVAR_GENQ_SHMEM_POOL_FREE_QUEUE_SENDER_SIDE ?
+    //                                  my_rank : grank, buf);
+    int queue_id = grank * ((MPIDU_genqi_shmem_pool_s *)transport->cell_pool)->num_proc + my_rank;
+    MPIDU_genq_shmem_queue_t queue = &transport->terminals[queue_id];
+    MPIDU_genqi_nem_spsc_enqueue(transport->cell_pool, queue, my_rank, grank, (void **) &cell);
+
 
     /* If a cell wasn't available, let the caller know that we weren't able to send the message
      * immediately. */
     if (unlikely(!cell)) {
+        // printf("MPIDI_POSIX_eager_send the cell wasn't available\n");
         ret = MPIDI_POSIX_NOK;
         goto fn_exit;
     }
 
-    /* Find the correct queue for this rank pair. */
-    terminal = &transport->terminals[MPIDI_POSIX_global.local_ranks[grank]];
+    // /* Find the correct queue for this rank pair. */
+    // #ifdef MPL_USE_CXL_SHM
+    // terminal = &transport->terminals[grank];
+    // #else
+    // terminal = &transport->terminals[MPIDI_POSIX_global.local_ranks[grank]];
+    // #endif
 
     /* Get the memory allocated to be used for the message transportation. */
     payload = MPIDI_POSIX_EAGER_IQUEUE_CELL_PAYLOAD(cell);
@@ -77,7 +92,11 @@ MPIDI_POSIX_eager_send(int grank, MPIDI_POSIX_am_header_t * msg_hdr, const void 
 
     available = capacity;
 
+    #ifdef MPL_USE_CXL_SHM
+    cell->from = my_rank;
+    #else
     cell->from = MPIDI_POSIX_global.my_local_rank;
+    #endif
 
     /* If this is the beginning of the message, mark it as the head. Otherwise it will be the
      * tail. */
@@ -109,7 +128,11 @@ MPIDI_POSIX_eager_send(int grank, MPIDI_POSIX_am_header_t * msg_hdr, const void 
         *bytes_sent = packed_size;
     }
 
-    MPIDU_genq_shmem_queue_enqueue(transport->cell_pool, terminal, (void *) cell);
+    // MPIDU_genqi_shmem_cell_header_s *cell_h = CELL_TO_HEADER(cell);
+    // clflush_region_with_mfence(cell_h, ((MPIDU_genqi_shmem_pool_s *)transport->cell_pool)->cell_alloc_size);
+    clflush_region_with_mfence(cell, sizeof(MPIDI_POSIX_eager_iqueue_cell_t) + cell->payload_size);
+    MPIDU_genqi_nem_spsc_enqueue_commit(transport->cell_pool, queue, my_rank, grank, (void **) &cell);
+    // ret = MPIDU_genq_shmem_queue_enqueue(transport->cell_pool, terminal, (void *) cell);
 
   fn_exit:
     MPIR_FUNC_EXIT;

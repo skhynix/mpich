@@ -89,7 +89,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDIG_isend_impl(const void *buf, MPI_Aint count,
     MPIDIG_REQUEST(sreq, count) = count;
 #endif
 
-    int is_local = MPIDI_av_is_local(addr);
+    int is_local = MPIDI_av_is_local_cxl(addr);
     MPI_Aint am_hdr_sz = (MPI_Aint) sizeof(am_hdr);
     if (MPIDIG_check_eager(is_local, am_hdr_sz, data_sz, buf, count, datatype, sreq)) {
         /* EAGER send */

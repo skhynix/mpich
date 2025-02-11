@@ -22,6 +22,7 @@ int MPIDI_XPMEM_init_world(void)
 
     /* If the user has disabled XPMEM, don't even try to initialize it. */
     if (!MPIR_CVAR_CH4_XPMEM_ENABLE) {
+        printf(" user has disabled XPMEM\n");
         goto fn_exit;
     }
 

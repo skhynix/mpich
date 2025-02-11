@@ -20,28 +20,44 @@ MPIDI_POSIX_eager_recv_begin(int vci, MPIDI_POSIX_eager_recv_transaction_t * tra
 
     /* TODO: measure the latency overhead due to multiple vci */
     int max_vcis = MPIDI_POSIX_eager_iqueue_global.max_vcis;
+    int recv_rank = MPIR_Process.rank;
+    bool has_cell = false;
     for (int vci_src = 0; vci_src < max_vcis; vci_src++) {
         transport = MPIDI_POSIX_eager_iqueue_get_transport(vci_src, vci);
+        int num_proc = ((MPIDU_genqi_shmem_pool_s *)transport->cell_pool)->num_proc;
+        for (int sender_rank = 0; sender_rank < num_proc ; sender_rank++) {
+            int queue_id = recv_rank * num_proc + sender_rank;
+            MPIDU_genq_shmem_queue_t queue = &transport->terminals[queue_id];
+            MPIDU_genqi_nem_spsc_dequeue(transport->cell_pool, queue, sender_rank, recv_rank, (void **) &cell);
+            // MPIDU_genq_shmem_queue_dequeue(transport->cell_pool, transport->my_terminal,
+            //                                (void **) &cell);
+            if (cell) {
+                // MPIDU_genqi_shmem_cell_header_s *cell_h = CELL_TO_HEADER(cell);
+                // clflush_region_with_mfence(cell_h, ((MPIDU_genqi_shmem_pool_s *)transport->cell_pool)->cell_alloc_size);
+                clflush_region_with_mfence(cell, sizeof(MPIDI_POSIX_eager_iqueue_cell_t));
+                transaction->src_local_rank = cell->from;
+                transaction->src_vci = vci_src;
+                transaction->dst_vci = vci;
+                transaction->payload = MPIDI_POSIX_EAGER_IQUEUE_CELL_PAYLOAD(cell);
+                transaction->payload_sz = cell->payload_size;
+                clflush_region_with_mfence(transaction->payload, transaction->payload_sz);
 
-        MPIDU_genq_shmem_queue_dequeue(transport->cell_pool, transport->my_terminal,
-                                       (void **) &cell);
-        if (cell) {
-            transaction->src_local_rank = cell->from;
-            transaction->src_vci = vci_src;
-            transaction->dst_vci = vci;
-            transaction->payload = MPIDI_POSIX_EAGER_IQUEUE_CELL_PAYLOAD(cell);
-            transaction->payload_sz = cell->payload_size;
+                if (likely(cell->type == MPIDI_POSIX_EAGER_IQUEUE_CELL_TYPE_HDR)) {
+                    transaction->msg_hdr = &cell->am_header;
+                } else {
+                    MPIR_Assert(cell->type == MPIDI_POSIX_EAGER_IQUEUE_CELL_TYPE_DATA);
+                    transaction->msg_hdr = NULL;
+                }
 
-            if (likely(cell->type == MPIDI_POSIX_EAGER_IQUEUE_CELL_TYPE_HDR)) {
-                transaction->msg_hdr = &cell->am_header;
-            } else {
-                MPIR_Assert(cell->type == MPIDI_POSIX_EAGER_IQUEUE_CELL_TYPE_DATA);
-                transaction->msg_hdr = NULL;
+                transaction->transport.iqueue.pointer_to_cell = cell;
+                MPIDU_genqi_nem_spsc_dequeue_commit(transport->cell_pool, queue, sender_rank, recv_rank, (void **) &cell);
+
+                ret = MPIDI_POSIX_OK;
+                has_cell = true;
+                break;
             }
-
-            transaction->transport.iqueue.pointer_to_cell = cell;
-
-            ret = MPIDI_POSIX_OK;
+        }
+        if (has_cell) {
             break;
         }
     }

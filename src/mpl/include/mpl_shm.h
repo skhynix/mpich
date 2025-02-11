@@ -18,6 +18,8 @@
 #include "mpl_shm_mmap.h"
 #elif defined MPL_USE_NT_SHM
 #include "mpl_shm_win.h"
+#elif defined MPL_USE_CXL_SHM
+#include "mpl_shm_cxl.h"
 #endif
 
 #define MPLI_SHM_FLAG_CLR         0x0
@@ -25,6 +27,7 @@
 #define MPLI_SHM_FLAG_SHM_ATTACH  0x10
 #define MPLI_SHM_FLAG_GHND_STATIC 0x100
 #define MPLI_SHM_FLAG_FIXED_ADDR  0x1000
+#define MPLI_SHM_FLAG_CXL         0x10000
 
 #define MPL_SHM_HND_INVALID    NULL
 #define MPLI_SHM_GHND_INVALID  NULL
@@ -132,12 +135,22 @@ static inline void MPLI_shm_hnd_reset_val(MPL_shm_hnd_t hnd)
 
 static inline void MPLI_shm_hnd_free(MPL_shm_hnd_t hnd)
 {
+    #ifdef MPL_USE_CXL_SHM
+    if (MPLI_shm_hnd_is_init(hnd)) {
+        if (!(hnd->flag & MPLI_SHM_FLAG_GHND_STATIC)) {
+            MPL_free(hnd->ghnd);
+        }
+        MPL_free(hnd->lhnd);
+        MPL_free(hnd);
+    }
+    #else
     if (MPLI_shm_hnd_is_init(hnd)) {
         if (!(hnd->flag & MPLI_SHM_FLAG_GHND_STATIC)) {
             MPL_free(hnd->ghnd);
         }
         MPL_free(hnd);
     }
+    #endif
 }
 
 /* interfaces */

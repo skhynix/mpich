@@ -59,7 +59,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_progress_recv(int vci, int *made_progre
             case MPIDI_POSIX_AM_TYPE__SHORT:
                 MPIDIG_global.target_msg_cbs[msg_hdr->handler_id] (am_hdr, payload, payload_left,
                                                                    attr, NULL);
-                MPIDI_POSIX_eager_recv_commit(&transaction);
+                // MPIDI_POSIX_eager_recv_commit(&transaction);
                 goto fn_exit;
             case MPIDI_POSIX_AM_TYPE__PIPELINE:
                 MPIDIG_global.target_msg_cbs[msg_hdr->handler_id] (am_hdr, NULL, payload_left,
@@ -83,7 +83,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_progress_recv(int vci, int *made_progre
         MPIDIG_REQUEST(rreq, req->target_cmpl_cb) (rreq);
     }
 
-    MPIDI_POSIX_eager_recv_commit(&transaction);
+    // MPIDI_POSIX_eager_recv_commit(&transaction);
 
   fn_exit:
     MPIR_FUNC_EXIT;
@@ -99,7 +99,6 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_progress_send(int vci, int *made_progre
     MPIR_FUNC_ENTER;
 
     if (MPIDI_POSIX_global.per_vci[vci].postponed_queue) {
-        *made_progress = 1;
         /* Drain postponed queue */
         curr_sreq_hdr = MPIDI_POSIX_global.per_vci[vci].postponed_queue;
 
@@ -129,6 +128,9 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_POSIX_progress_send(int vci, int *made_progre
                 MPIR_Assert(0);
         }
 
+        if (curr_sreq_hdr != MPIDI_POSIX_global.per_vci[vci].postponed_queue) {
+            *made_progress = 1;
+        }
     }
 
     MPIR_FUNC_EXIT;

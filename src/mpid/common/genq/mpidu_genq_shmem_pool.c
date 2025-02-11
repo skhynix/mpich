@@ -53,31 +53,35 @@ static int cell_block_alloc(MPIDU_genqi_shmem_pool_s * pool, int block_idx)
     MPIDU_genqi_shmem_cell_header_s **new_cell_headers = NULL;
 
     new_cell_headers =
-        (MPIDU_genqi_shmem_cell_header_s **) MPL_malloc(pool->cells_per_proc
+        (MPIDU_genqi_shmem_cell_header_s **) MPL_malloc(pool->cells_per_proc * pool->num_proc
                                                         * sizeof(MPIDU_genqi_shmem_cell_header_s *),
                                                         MPL_MEM_OTHER);
     MPIR_ERR_CHKANDJUMP(!new_cell_headers, rc, MPI_ERR_OTHER, "**nomem");
     pool->cell_headers = new_cell_headers;
 
     /* init cell headers */
-    int idx = block_idx * pool->cells_per_proc;
-    for (int i = 0; i < pool->cells_per_proc; i++) {
+    // int idx = block_idx * pool->cells_per_proc;
+    int idx_base = block_idx * pool->num_proc * pool->cells_per_proc;
+    for (int p = 0; p < pool->num_proc; p++) {
+      int idx = idx_base + p * pool->cells_per_proc;
+      for (int i = 0; i < pool->cells_per_proc; i++) {
         /* Have the "host" process for each cell zero-out the cell contents to force the first-touch
          * policy to make the pages resident to that process. */
         memset((char *) pool->cell_header_base + (idx + i) * pool->cell_alloc_size, 0,
                pool->cell_alloc_size);
-
-        pool->cell_headers[i] =
+        int cell_header_idx = i + p * pool->cells_per_proc;
+        pool->cell_headers[cell_header_idx] =
             (MPIDU_genqi_shmem_cell_header_s *) ((char *) pool->cell_header_base
                                                  + (idx + i) * pool->cell_alloc_size);
         /* The handle value is the one being stored in the next, prev, head, tail pointers.
          * All valid handle must to be non-zero, a zero handle is equivalent to a NULL pointer. */
-        pool->cell_headers[i]->handle =
-            (uintptr_t) pool->cell_headers[i] - (uintptr_t) pool->cell_header_base + 1;
-        pool->cell_headers[i]->block_idx = block_idx;
-        rc = MPIDU_genq_shmem_queue_enqueue(pool, &pool->free_queues[block_idx],
-                                            HEADER_TO_CELL(pool->cell_headers[i]));
+        pool->cell_headers[cell_header_idx]->handle =
+            (uintptr_t) pool->cell_headers[cell_header_idx] - (uintptr_t) pool->cell_header_base + 1;
+        pool->cell_headers[cell_header_idx]->block_idx = block_idx;
+        // rc = MPIDU_genq_shmem_queue_enqueue(pool, &pool->free_queues[block_idx],
+                                            // HEADER_TO_CELL(pool->cell_headers[cell_header_idx]));
         MPIR_ERR_CHECK(rc);
+      }
     }
 
   fn_exit:
@@ -108,8 +112,10 @@ int MPIDU_genq_shmem_pool_create(uintptr_t cell_size, uintptr_t cells_per_proc,
     pool_obj->gpu_registered = false;
 
     /* the global_block_index is at the end of the slab to avoid extra need of alignment */
-    int total_cells_size = num_proc * cells_per_proc * pool_obj->cell_alloc_size;
-    int free_queue_size = num_proc * sizeof(MPIDU_genq_shmem_queue_u);
+    // int total_cells_size = num_proc * cells_per_proc * pool_obj->cell_alloc_size;
+    uint64_t total_cells_size = num_proc * num_proc * cells_per_proc * pool_obj->cell_alloc_size;
+    // int free_queue_size = num_proc * sizeof(MPIDU_genq_shmem_queue_u);
+    uint64_t free_queue_size = num_proc * num_proc * sizeof(MPIDU_genq_shmem_queue_u);
     slab_size = total_cells_size + free_queue_size;
 
     rc = MPIDU_Init_shm_alloc(slab_size, &pool_obj->slab);
@@ -121,10 +127,13 @@ int MPIDU_genq_shmem_pool_create(uintptr_t cell_size, uintptr_t cells_per_proc,
 
     /* If using sender-side queuing, use an MPSC lock. If using recevier-side queuing, an MPMC lock
      * is needed. */
-    rc = MPIDU_genq_shmem_queue_init(&pool_obj->free_queues[rank],
-                                     MPIR_CVAR_GENQ_SHMEM_POOL_FREE_QUEUE_SENDER_SIDE ?
-                                     MPIDU_GENQ_SHMEM_QUEUE_TYPE__MPSC :
-                                     MPIDU_GENQ_SHMEM_QUEUE_TYPE__MPMC);
+    // rc = MPIDU_genq_shmem_queue_init(&pool_obj->free_queues[rank],
+    //                                  MPIR_CVAR_GENQ_SHMEM_POOL_FREE_QUEUE_SENDER_SIDE ?
+    //                                  MPIDU_GENQ_SHMEM_QUEUE_TYPE__MPSC :
+    //                                  MPIDU_GENQ_SHMEM_QUEUE_TYPE__MPMC);
+    rc = MPIDU_genq_shmem_queue_init_from_base(&pool_obj->free_queues[rank * num_proc],
+                                    MPIDU_GENQ_SHMEM_QUEUE_TYPE__SPSC);
+    
     MPIR_ERR_CHECK(rc);
 
     rc = cell_block_alloc(pool_obj, rank);
@@ -132,6 +141,9 @@ int MPIDU_genq_shmem_pool_create(uintptr_t cell_size, uintptr_t cells_per_proc,
 
     rc = MPIDU_Init_shm_barrier();
     MPIR_ERR_CHECK(rc);
+    // clflush_region_with_mfence((char *) pool_obj->cell_header_base, total_cells_size);
+    // rc = MPIDU_Init_shm_barrier();
+    // MPIR_ERR_CHECK(rc);
 
     *pool = (MPIDU_genq_shmem_pool_t) pool_obj;
 

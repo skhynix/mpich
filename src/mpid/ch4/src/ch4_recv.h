@@ -111,7 +111,7 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_irecv(void *buf,
         mpi_errno = anysource_irecv(buf, count, datatype, rank, tag, comm, attr, av, req);
 
     } else {
-        if (MPIDI_av_is_local(av))
+        if (MPIDI_av_is_local_cxl(av))
             mpi_errno = MPIDI_SHM_mpi_irecv(buf, count, datatype, rank, tag, comm, attr, req);
         else
             mpi_errno =

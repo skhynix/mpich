@@ -22,7 +22,8 @@ int mkstemp(char *template);
 #else
 int MPL_mkstemp(char *template);
 #endif
-
+int MPL_tmpx(char *template, char **X);
+void MPL_randchar(char xs[]);
 int MPL_hex_encode(int size, const void *src, char *dest);
 int MPL_hex_decode(int size, const char *src, void *dest);
 

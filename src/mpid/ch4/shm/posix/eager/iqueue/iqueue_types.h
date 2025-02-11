@@ -29,7 +29,8 @@ typedef struct MPIDI_POSIX_eager_iqueue_transport {
     int size_of_cell;           /* The size of each of the cells in this transport */
     MPIDU_genq_shmem_queue_u *terminals;        /* The list of all the terminals that
                                                  * describe each of the cells */
-    MPIDU_genq_shmem_queue_t my_terminal;
+    // MPIDU_genq_shmem_queue_t my_terminal;
+    MPIDU_genq_shmem_queue_t my_terminal_base;
     MPIDU_genq_shmem_pool_t cell_pool;
 } MPIDI_POSIX_eager_iqueue_transport_t;
 

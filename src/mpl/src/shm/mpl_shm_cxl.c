@@ -1,0 +1,230 @@
+/*
+ * Copyright (C) by Argonne National Laboratory
+ *     See COPYRIGHT in top-level directory
+ */
+
+#include "mpl.h"
+
+MPL_SUPPRESS_OSX_HAS_NO_SYMBOLS_WARNING;
+
+#ifdef MPL_USE_CXL_SHM
+
+#include <fcntl.h>
+
+#ifdef MPL_HAVE_SYS_MMAN_H
+#include <sys/mman.h>
+#endif
+
+#define MAX_TRIES 100   /* max number of filenames we try before giving up */
+
+inline int MPLI_shm_lhnd_close(MPL_shm_hnd_t hnd)
+{
+    MPLI_shm_lhnd_t lhnd = MPLI_SHM_LHND_INVALID;
+    lhnd = MPLI_shm_lhnd_get(hnd);
+    if (lhnd != MPLI_SHM_LHND_INVALID) {
+        if (cxl_shm_close(lhnd) == 0) {
+            MPLI_shm_lhnd_set(hnd, MPLI_SHM_LHND_INIT_VAL);
+        } else {
+            /* close() failed */
+            return MPL_ERR_SHM_INTERN;
+        }
+    }
+    return MPL_SUCCESS;
+}
+
+static inline int check_valid_fixed_mmap_range(void *shm_addr, intptr_t seg_sz)
+{
+    int rc = 0, is_valid = 1;
+    size_t page_sz = 0, mapsize = 0, num_pages = 0, i;
+
+    if (shm_addr == NULL)
+        return 0;       /* NULL is not a valid maprage */
+
+    page_sz = sysconf(_SC_PAGESIZE);
+    mapsize = (seg_sz + (page_sz - 1)) & (~(page_sz - 1));
+    num_pages = mapsize / page_sz;
+
+    char *ptr = (char *) shm_addr;
+    for (i = 0; i < num_pages; i++) {
+        /* return ENOMEM if the page is not mapped */
+        rc = msync(ptr, page_sz, 0);
+        if (rc != -1 || errno != ENOMEM) {
+            is_valid = 0;
+            break;
+        }
+        ptr += page_sz;
+    }
+    return is_valid;
+}
+
+/* A template function which creates/attaches shm seg handle
+ * to the shared memory. Used by user-exposed functions below
+ */
+static inline int MPL_shm_seg_create_attach_templ(MPL_shm_hnd_t hnd, intptr_t seg_sz,
+                                                  void **shm_addr_ptr, int offset, int flag)
+{
+    cxl_shm_hnd_t cxl_hnd;
+    int rc = MPL_SUCCESS, rc_close = MPL_SUCCESS;
+
+    if (flag & MPLI_SHM_FLAG_SHM_CREATE) {
+        char chosen_fname[] = "mpich_XXXXXX";
+        char *X;
+        MPL_tmpx(chosen_fname, &X);
+        for (int i = 0; i < MAX_TRIES; ++i) {
+            MPL_randchar(X);
+            rc = cxl_shm_create(chosen_fname, seg_sz, &cxl_hnd);
+            if (rc == MPL_SUCCESS) {
+                break;
+            }
+        }
+        if (rc != MPL_SUCCESS) {
+            fprintf(stderr, "cxl_shm_create failed\n");
+            rc = MPL_ERR_SHM_INTERN;
+            goto fn_fail;
+        }
+        MPLI_shm_lhnd_set(hnd, &cxl_hnd);
+
+        rc = MPLI_shm_ghnd_alloc(hnd, MPL_MEM_SHM);
+        if (rc != MPL_SUCCESS) {
+            goto fn_fail;
+        }
+        rc = MPLI_shm_ghnd_set_by_val(hnd, "%s", chosen_fname);
+        if (rc != MPL_SUCCESS) {
+            goto fn_fail;
+        }
+    } else {
+        /* Open an existing shared memory seg */
+        if (!MPLI_shm_lhnd_is_valid(hnd)) {
+            rc = cxl_shm_open_obj(MPLI_shm_ghnd_get_by_ref(hnd), &cxl_hnd);
+            if (rc != MPL_SUCCESS) {
+                rc = MPL_ERR_SHM_INTERN;
+                goto fn_fail;
+            }            
+            MPLI_shm_lhnd_set(hnd, &cxl_hnd);
+        }
+    }
+
+    if (flag & MPLI_SHM_FLAG_SHM_ATTACH) {
+        // TODO: maybe directly remove MPLI_SHM_FLAG_FIXED_ADDR logic
+        if (flag & MPLI_SHM_FLAG_FIXED_ADDR) {
+            void *start_addr = *shm_addr_ptr;
+            fprintf(stderr, "No support for MPLI_SHM_FLAG_FIXED_ADDR in CXL shm\n");
+            rc = MPL_ERR_SHM_INVAL;
+            goto fn_fail;
+        } else {
+            *shm_addr_ptr =  MPLI_shm_lhnd_get(hnd)->mapped_addr;
+        }
+
+        if (*shm_addr_ptr == MAP_FAILED || *shm_addr_ptr == NULL) {
+            rc = MPL_ERR_SHM_INVAL;
+            goto fn_fail;
+        }
+    }
+  fn_exit:
+    /* FIXME: Close local handle only when closing the shm handle */
+    if (MPLI_shm_lhnd_is_valid(hnd)) {
+        rc_close = MPLI_shm_lhnd_close(hnd);
+    }
+    return (rc != MPL_SUCCESS) ? rc : rc_close;
+  fn_fail:
+    goto fn_exit;
+}
+
+/* Create new SHM segment
+ * hnd : A "init"ed shared memory handle
+ * seg_sz : Size of shared memory segment to be created
+ */
+int MPL_shm_seg_create(MPL_shm_hnd_t hnd, intptr_t seg_sz)
+{
+    int rc = MPL_SUCCESS;
+    rc = MPL_shm_seg_create_attach_templ(hnd, seg_sz, NULL, 0, MPLI_SHM_FLAG_SHM_CREATE);
+    return rc;
+}
+
+/* Open an existing SHM segment
+ * hnd : A shm handle with a valid global handle
+ * seg_sz : Size of shared memory segment to open
+ * Currently only using internally within wrapper funcs
+ */
+int MPL_shm_seg_open(MPL_shm_hnd_t hnd, intptr_t seg_sz)
+{
+    int rc = MPL_SUCCESS;
+    rc = MPL_shm_seg_create_attach_templ(hnd, seg_sz, NULL, 0, MPLI_SHM_FLAG_CLR);
+    return rc;
+}
+
+/* Create new SHM segment and attach to it
+ * hnd : A "init"ed shared mem handle
+ * seg_sz: Size of shared mem segment
+ * shm_addr_ptr : Pointer to shared memory address to attach
+ *                  the shared mem segment
+ * offset : Offset to attach the shared memory address to
+ */
+int MPL_shm_seg_create_and_attach(MPL_shm_hnd_t hnd, intptr_t seg_sz,
+                                  void **shm_addr_ptr, int offset)
+{
+    return MPL_shm_seg_create_attach_templ(hnd, seg_sz, shm_addr_ptr, offset,
+                                           MPLI_SHM_FLAG_SHM_CREATE | MPLI_SHM_FLAG_SHM_ATTACH);
+}
+
+/* Attach to an existing SHM segment
+ * hnd : A "init"ed shared mem handle
+ * seg_sz: Size of shared mem segment
+ * shm_addr_ptr : Pointer to shared memory address to attach
+ *                  the shared mem segment
+ * offset : Offset to attach the shared memory address to
+ */
+int MPL_shm_seg_attach(MPL_shm_hnd_t hnd, intptr_t seg_sz, void **shm_addr_ptr, int offset)
+{
+    return MPL_shm_seg_create_attach_templ(hnd, seg_sz, shm_addr_ptr, offset,
+                                           MPLI_SHM_FLAG_SHM_ATTACH);
+}
+
+/* Create new SHM segment and attach to it with specified starting address
+ * hnd : A "init"ed shared mem handle
+ * seg_sz: Size of shared mem segment
+ * shm_addr_ptr (inout): Pointer to specified starting address, the address cannot be NULL.
+ *                       The attached memory address is updated at return.
+ * offset : Offset to attach the shared memory address to
+ */
+int MPL_shm_fixed_seg_create_and_attach(MPL_shm_hnd_t hnd, intptr_t seg_sz,
+                                        void **shm_addr_ptr, int offset)
+{
+    return MPL_shm_seg_create_attach_templ(hnd, seg_sz, shm_addr_ptr, offset,
+                                           MPLI_SHM_FLAG_SHM_CREATE | MPLI_SHM_FLAG_SHM_ATTACH |
+                                           MPLI_SHM_FLAG_FIXED_ADDR);
+}
+
+/* Attach to an existing SHM segment with specified starting address
+ * hnd : A "init"ed shared mem handle
+ * seg_sz: Size of shared mem segment
+ * shm_addr_ptr (inout): Pointer to specified starting address, the address cannot be NULL.
+ *                       The attached memory address is updated at return.
+ * offset : Offset to attach the shared memory address to
+ */
+int MPL_shm_fixed_seg_attach(MPL_shm_hnd_t hnd, intptr_t seg_sz, void **shm_addr_ptr, int offset)
+{
+    return MPL_shm_seg_create_attach_templ(hnd, seg_sz, shm_addr_ptr, offset,
+                                           MPLI_SHM_FLAG_SHM_ATTACH | MPLI_SHM_FLAG_FIXED_ADDR);
+}
+
+/* Detach from an attached SHM segment */
+int MPL_shm_seg_detach(MPL_shm_hnd_t hnd, void **shm_addr_ptr, intptr_t seg_sz)
+{
+    *shm_addr_ptr = NULL;
+
+    return MPL_SUCCESS;
+}
+
+/* Free an existing SHM segment */
+int MPL_shm_seg_free(MPL_shm_hnd_t hnd)
+{
+    int rc = -1;
+
+    rc = cxl_shm_destroy_from_hnd(hnd->lhnd);
+    
+    return (rc == 0) ? MPL_SUCCESS : MPL_ERR_SHM_INTERN;
+}
+
+
+#endif /* MPL_USE_CXL_SHM */

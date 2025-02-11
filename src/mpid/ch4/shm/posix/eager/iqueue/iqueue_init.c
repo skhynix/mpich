@@ -46,24 +46,39 @@ static int init_transport(int vci_src, int vci_dst)
     transport->num_cells = MPIR_CVAR_CH4_SHM_POSIX_IQUEUE_NUM_CELLS;
     transport->size_of_cell = MPIR_CVAR_CH4_SHM_POSIX_IQUEUE_CELL_SIZE;
 
+
+    #ifdef MPL_USE_CXL_SHM
+    int num_ranks = MPIR_Process.size;
+    int my_rank = MPIR_Process.rank;
+    #else
+    int num_ranks = MPIDI_POSIX_global.num_local;
+    int my_rank = MPIDI_POSIX_global.my_local_rank; 
+    #endif
+    // fprintf(stderr, "MPIDU_genq_shmem_pool_create start  rank %d\n", my_rank);
     mpi_errno = MPIDU_genq_shmem_pool_create(transport->size_of_cell, transport->num_cells,
-                                             MPIDI_POSIX_global.num_local,
-                                             MPIDI_POSIX_global.my_local_rank,
+                                             num_ranks,
+                                             my_rank,
                                              &transport->cell_pool);
+    // fprintf(stderr, "MPIDU_genq_shmem_pool_create done rank %d\n", my_rank);
     MPIR_ERR_CHECK(mpi_errno);
 
     size_t size_of_terminals;
     /* Create one terminal for each process with which we will be able to communicate. */
-    size_of_terminals = (size_t) MPIDI_POSIX_global.num_local * sizeof(MPIDU_genq_shmem_queue_u);
+    // size_of_terminals = (size_t) num_ranks * sizeof(MPIDU_genq_shmem_queue_u);
+    size_of_terminals = (size_t) num_ranks * num_ranks * sizeof(MPIDU_genq_shmem_queue_u);
 
     /* Create the shared memory regions that will be used for the iqueue cells and terminals. */
     mpi_errno = MPIDU_Init_shm_alloc(size_of_terminals, (void *) &transport->terminals);
     MPIR_ERR_CHECK(mpi_errno);
 
-    transport->my_terminal = &transport->terminals[MPIDI_POSIX_global.my_local_rank];
+    // transport->my_terminal = &transport->terminals[my_rank];
+    transport->my_terminal_base = &transport->terminals[my_rank * num_ranks];
 
-    mpi_errno = MPIDU_genq_shmem_queue_init(transport->my_terminal,
-                                            MPIDU_GENQ_SHMEM_QUEUE_TYPE__MPSC);
+
+    // mpi_errno = MPIDU_genq_shmem_queue_init(transport->my_terminal,
+    //                                         MPIDU_GENQ_SHMEM_QUEUE_TYPE__MPSC);
+    mpi_errno = MPIDU_genq_shmem_queue_init_from_base(transport->my_terminal_base,
+                                            MPIDU_GENQ_SHMEM_QUEUE_TYPE__SPSC);
     MPIR_ERR_CHECK(mpi_errno);
 
   fn_exit:
@@ -107,7 +122,11 @@ int MPIDI_POSIX_iqueue_post_init(void)
     max_vcis = 0;
     MPIDU_Init_shm_put(&MPIDI_POSIX_global.num_vcis, sizeof(int));
     MPIDU_Init_shm_barrier();
+    #ifdef MPL_USE_CXL_SHM
+    for (int i = 0; i < MPIR_Process.size; i++) {
+    #else
     for (int i = 0; i < MPIDI_POSIX_global.num_local; i++) {
+    #endif
         int num;
         MPIDU_Init_shm_get(i, sizeof(int), &num);
         if (max_vcis < num) {

@@ -31,3 +31,18 @@ int MPIDU_genq_shmem_queue_init(MPIDU_genq_shmem_queue_t queue, int flags)
     MPIR_FUNC_EXIT;
     return rc;
 }
+
+int MPIDU_genq_shmem_queue_init_from_base(MPIDU_genq_shmem_queue_t queue_base, int num_procs)
+{
+    int rc = MPI_SUCCESS;
+    MPIR_FUNC_ENTER;
+    MPIDU_genq_shmem_queue_u * queue_obj_base = (MPIDU_genq_shmem_queue_u *) queue_base;
+    MPIDU_genq_shmem_queue_u *queue_obj = NULL;
+    for (int i = 0; i < num_procs; i++) {
+        queue_obj = &queue_obj_base[i];
+        rc = MPIDU_genqi_nem_spsc_init(queue_obj);
+    }
+
+    MPIR_FUNC_EXIT;
+    return rc;
+}
