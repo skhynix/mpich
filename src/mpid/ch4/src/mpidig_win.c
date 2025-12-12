@@ -517,7 +517,7 @@ static int win_shm_alloc_impl(MPI_Aint size, int disp_unit, MPIR_Comm * comm_ptr
     bool symheap_mapfail_flag = false, shm_mapfail_flag = false;
     bool symheap_flag = true, global_symheap_flag = false;
 
-    MPIR_CHKPMEM_DECL(2);
+    MPIR_CHKPMEM_DECL(3);
     MPIR_CHKLMEM_DECL(1);
     MPIR_FUNC_ENTER;
 
